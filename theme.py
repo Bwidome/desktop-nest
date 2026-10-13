@@ -75,16 +75,141 @@ DARK = {
 
 RADIUS = 10
 RADIUS_SMALL = 7
+# 主面板那张悬浮卡片用的大圆角
+GLASS_RADIUS = 22
 FONT_FAMILY = '"Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif'
+
+# --------------------------------------------------------------------------
+# 主面板：悬浮磨砂玻璃卡片
+# --------------------------------------------------------------------------
+# 单独一份，**不跟 LIGHT/DARK 走**：需求要的是"半透明深色 + 模糊"的悬浮卡片，
+# 浅色主题下把它做成白底就把"磨砂玻璃"的味道丢掉了。
+# 这里所有底色都带 alpha——留出透明度，好让 DWM 的磨砂（见 acrylic.py）
+# 透上来；不透明的话磨砂就被自己的底色盖住了。
+GLASS = {
+    # 卡片底（配合磨砂）。注意它和 DWM 的着色是**两层**深色，都调浓就成了一块
+    # 黑板：这里 0.58 + panel.GLASS_TINT_ALPHA 0.26 叠出来约等于 0.69 的观感，
+    # 既能看清字，又明显透得出背后的东西。
+    "card": "rgba(24, 26, 32, 0.58)",
+    "card_border": "rgba(255, 255, 255, 0.12)",
+    "surface": "rgba(255, 255, 255, 0.06)",    # 内部卡片 / 列表底
+    "surface_alt": "rgba(255, 255, 255, 0.04)",
+    "hover": "rgba(255, 255, 255, 0.10)",
+    "pressed": "rgba(255, 255, 255, 0.16)",
+    "border": "rgba(255, 255, 255, 0.10)",
+    "border_strong": "rgba(255, 255, 255, 0.20)",
+    "text": "#F3F5F9",
+    "text_sub": "#C3CAD6",
+    "text_faint": "#98A1B0",
+    "accent": "#8CA2FF",
+    "accent_hover": "#A0B2FF",
+    "accent_pressed": "#7590F5",
+    "accent_soft": "rgba(140, 162, 255, 0.22)",
+    "success": "#4FD695",
+    "success_soft": "rgba(79, 214, 149, 0.18)",
+    "warn": "#F2BC6A",
+    "warn_soft": "rgba(242, 188, 106, 0.16)",
+    "danger": "#FF9088",
+    "danger_soft": "rgba(255, 144, 136, 0.18)",
+    "highlight": "rgba(255, 214, 102, 0.32)",
+    "shadow": "rgba(0, 0, 0, 0.50)",
+    "popup": "rgba(24, 26, 32, 0.72)",
+    "popup_alt": "rgba(255, 255, 255, 0.06)",
+    "popup_border": "rgba(255, 255, 255, 0.12)",
+}
 
 
 def palette(dark: bool = False) -> dict:
     return dict(DARK if dark else LIGHT)
 
 
-def stylesheet(dark: bool = False) -> str:
-    """生成整份 QSS。"""
+def glass_palette_roles() -> dict:
+    """玻璃卡片要用的 `QPalette` 颜色。
+
+    光有 QSS 不够：QSS 只覆盖写到的控件，没写到的（QTabBar 的空白、
+    表头间隙、滚动条槽…）会回落到**系统调色板**——那是浅色的，
+    在深色玻璃上就是一块刺眼的白。所以调色板也要跟着换深色。
+    """
+    return {
+        "window": "#181A20",
+        "base": "#181A20",
+        "alternate": "#1E2128",
+        "text": GLASS["text"],
+        "sub": GLASS["text_faint"],
+        "button": "#22252C",
+        "highlight": GLASS["accent"],
+        "highlight_text": "#FFFFFF",
+    }
+
+
+def stylesheet(dark: bool = False, *, glass: bool = False) -> str:
+    """生成整份 QSS。
+
+    glass=True 时把配色换成 `GLASS`（半透明深色），并额外加上主面板那张
+    悬浮卡片的规则——磨砂玻璃外观靠它 + `acrylic.py` 的 DWM 模糊一起实现。
+    """
     c = palette(dark)
+    if glass:
+        c.update(GLASS)
+
+    glass_block = ""
+    if glass:
+        glass_block = f"""
+/* ---------- 主面板：悬浮磨砂玻璃卡片 ---------- */
+/* 顶层窗口自己不画底（画了就把磨砂盖住了），深色半透明只画在这张卡片上 */
+#MainPanel {{ background: transparent; }}
+#MainCard {{
+    background: {c['card']};
+    border: 1px solid {c['card_border']};
+    border-radius: {GLASS_RADIUS}px;
+}}
+/* 玻璃卡片里的树：底色必须透，否则会在卡片上糊一块不透明的白 */
+QTreeWidget {{
+    background: transparent;
+    border: none;
+    alternate-background-color: transparent;
+}}
+QTreeWidget::item {{ border-radius: 6px; padding: 3px 4px; }}
+QTreeWidget::item:hover {{ background: {c['hover']}; }}
+QTreeWidget::item:selected {{ background: {c['accent_soft']}; color: {c['text']}; }}
+QHeaderView {{ background: transparent; border: none; }}
+QHeaderView::section {{
+    background: {c['surface_alt']};
+    color: {c['text_faint']};
+    border: none;
+    border-bottom: 1px solid {c['border']};
+    padding: 6px 8px;
+}}
+QTabWidget::pane {{ background: {c['surface']}; }}
+/* ---------- 弹出类控件必须**不透明** ---------- */
+/* 它们会继承这张玻璃样式表：底色一旦跟着半透明，右键菜单、消息框、
+   提示气泡就会"看不见"。所以这里单独给一层不透明的深色底。 */
+QMenu, QMessageBox {{
+    background: #22252C;
+    border: 1px solid {c['card_border']};
+}}
+QMenu::item {{ color: {c['text']}; }}
+QMenu::item:selected {{ background: {c['accent_soft']}; color: {c['text']}; }}
+QMenu::separator {{ background: {c['border']}; }}
+QMessageBox QLabel {{ color: {c['text']}; }}
+QToolTip {{
+    background: #2C3038;
+    color: {c['text']};
+    border: 1px solid {c['card_border']};
+}}
+/* 无边框窗口没有系统标题栏，关闭按钮自己画一个 */
+#GlassClose {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    color: {c['text_sub']};
+    font-size: 11.25pt;
+    padding: 1px 9px;
+}}
+#GlassClose:hover {{ background: rgba(255, 118, 108, 0.85); color: #FFFFFF; }}
+#GlassClose:pressed {{ background: rgba(214, 84, 76, 0.95); color: #FFFFFF; }}
+"""
+
     return f"""
 /* ---------- 全局 ---------- */
 * {{
@@ -105,6 +230,7 @@ QDialog, QMainWindow {{
     border: 1px solid {c['border']};
     border-radius: {RADIUS}px;
 }}
+{glass_block}
 /* ---------- 上拉菜单（收纳面板）---------- */
 #Popup {{
     background: {c['popup']};

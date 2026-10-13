@@ -20,6 +20,21 @@
 
 * 收纳位置是程序自己的隐藏目录，不需要用户管理（没有"仓库"这个概念了）
 * 启动自动收纳、退出自动还原，都在设置里可以关掉
+
+外观：**悬浮的磨砂玻璃卡片**
+----------------------------
+无边框 + 窗口自身透明，深色半透明只画在内部的 `#MainCard` 上；
+真正的"把背后桌面模糊掉"由 DWM 提供（见 `acrylic.py`），
+窗口再按圆角裁一刀，免得模糊糊到圆角外面。
+
+两个容易踩的点：
+
+1. **不能给顶层窗口设 QSS 背景**——那会把磨砂整块盖住，看起来就是一块
+   不透明的板子。卡片外观一律交给子控件。
+2. **必须同时换 QPalette**。QSS 只覆盖写到的控件，没写到的（QTabBar 的空白、
+   表头间隙…）会回落到系统调色板，那是浅色的，在深色玻璃上就是一道刺眼的白。
+
+拖动：没有系统标题栏，所以按住卡片空白处可以拖走（`mousePressEvent` 系列）。
 """
 
 from __future__ import annotations
@@ -28,15 +43,22 @@ import time
 from pathlib import Path
 
 from qt_compat import (
-    QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton, QTabWidget,
-    QTreeWidget, QTreeWidgetItem, Qt, QVBoxLayout, QWidget, Signal,
+    QColor, QFrame, QHBoxLayout, QLabel, QMessageBox, QPalette, QPushButton,
+    QTabWidget, QToolButton, QTreeWidget, QTreeWidgetItem, Qt, QVBoxLayout,
+    QWidget, Signal,
 )
 
+import acrylic
 import config
 import engine
 import nest
 import theme as theme_mod
 from widgets import IconLoader, app_icon
+
+# 磨砂玻璃的着色。要和 theme.GLASS['card'] 对齐着看：
+# DWM 的着色和卡片自己的底色是**两层**，都调浓就会叠成一块黑板。
+GLASS_TINT = "#181A20"
+GLASS_TINT_ALPHA = 0.26
 
 
 class StatCard(QFrame):
@@ -82,12 +104,22 @@ class MainPanel(QWidget):
         self._items: "list" = []
         self._history: "list[dict]" = []
         self._row_by_key: "dict[str, QTreeWidgetItem]" = {}
+        self._drag_offset = None
+        self._glass_mode = ""
+        self._glass_ready = False
 
+        # 悬浮卡片：无边框 + 窗口自身透明，深色半透明只画在里面的 #MainCard 上。
+        # 注意**不能**给顶层窗口设 QSS 背景——那会把 DWM 的磨砂整块盖住，
+        # 卡片外观一律交给子控件（和收纳面板的 #Popup 一个套路）。
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setObjectName("MainPanel")
         self.setWindowTitle("桌面收纳 · 主面板")
         self.setWindowIcon(app_icon())
         self.setMinimumSize(820, 600)
         self.resize(940, 680)
         self._build_ui()
+        self._apply_glass_palette()
         self.apply_theme(self.dark)
 
         self.loader = IconLoader(self, per_tick=4)
@@ -97,7 +129,15 @@ class MainPanel(QWidget):
     # 界面
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
+        # 外层留 0 边距：卡片就是整块窗口，这样 DWM 的圆角裁剪和卡片圆角能对齐
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self.card = QFrame(self)
+        self.card.setObjectName("MainCard")
+        outer.addWidget(self.card)
+
+        root = QVBoxLayout(self.card)
         root.setContentsMargins(18, 16, 18, 16)
         root.setSpacing(13)
 
@@ -116,6 +156,15 @@ class MainPanel(QWidget):
         self.badge_state = QLabel("准备就绪")
         self.badge_state.setObjectName("Badge")
         header.addWidget(self.badge_state, 0, Qt.AlignmentFlag.AlignTop)
+
+        # 无边框窗口没有系统标题栏，关闭按钮得自己给一个
+        self.btn_close = QToolButton()
+        self.btn_close.setObjectName("GlassClose")
+        self.btn_close.setText("✕")
+        self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close.setToolTip("关闭面板（程序继续驻留托盘）")
+        self.btn_close.clicked.connect(self.hide)
+        header.addWidget(self.btn_close, 0, Qt.AlignmentFlag.AlignTop)
         root.addLayout(header)
 
         self.notice = QLabel("")
@@ -152,6 +201,10 @@ class MainPanel(QWidget):
 
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
+        # documentMode 下 QTabBar 会在顶边画一条"基线"——原生样式用**主题位图**
+        # 画的，既不吃 QSS 也不吃调色板（浅色主题下看不出来，深色玻璃上就是
+        # 一道刺眼的白）。关掉它，标签的观感全靠 QSS，反而更整齐。
+        self.tabs.tabBar().setDrawBase(False)
         self.tabs.addTab(self._build_items_tab(), "面板内容")
         self.tabs.addTab(self._build_history_tab(), "操作历史")
         root.addWidget(self.tabs, 1)
@@ -244,9 +297,99 @@ class MainPanel(QWidget):
         layout.addLayout(history_actions)
         return widget
 
+    def _apply_glass_palette(self) -> None:
+        """把窗口调色板换成深色，兜住 QSS 没写到的控件。"""
+        roles = theme_mod.glass_palette_roles()
+        pal = self.palette()
+        mapping = {
+            QPalette.ColorRole.Window: roles["window"],
+            QPalette.ColorRole.WindowText: roles["text"],
+            QPalette.ColorRole.Base: roles["base"],
+            QPalette.ColorRole.AlternateBase: roles["alternate"],
+            QPalette.ColorRole.Text: roles["text"],
+            QPalette.ColorRole.Button: roles["button"],
+            QPalette.ColorRole.ButtonText: roles["text"],
+            QPalette.ColorRole.ToolTipBase: roles["button"],
+            QPalette.ColorRole.ToolTipText: roles["text"],
+            QPalette.ColorRole.Highlight: roles["highlight"],
+            QPalette.ColorRole.HighlightedText: roles["highlight_text"],
+            QPalette.ColorRole.PlaceholderText: roles["sub"],
+        }
+        for role, value in mapping.items():
+            pal.setColor(role, QColor(value))
+        self.setPalette(pal)
+
     def apply_theme(self, dark: bool) -> None:
+        # 主面板固定用深色磨砂玻璃（需求如此），所以 dark 只影响别处的窗口；
+        # 这里保留参数是为了和调用方（tray_app）的接口保持一致。
         self.dark = dark
-        self.setStyleSheet(theme_mod.stylesheet(dark))
+        self._restyle()
+
+    def _restyle(self) -> None:
+        """套用玻璃卡片样式。
+
+        拿不到磨砂（老系统 / 被策略挡住）时把卡片底色加浓一档——
+        没有模糊还那么透，文字会看不清。
+        """
+        sheet = theme_mod.stylesheet(self.dark, glass=True)
+        if not self._glass_mode:
+            sheet += ("\n#MainCard { background: rgba(24, 26, 32, 0.90);"
+                      " border-color: rgba(255, 255, 255, 0.14); }\n")
+        self.setStyleSheet(sheet)
+
+    # ------------------------------------------------------------------
+    # 悬浮玻璃卡片：DWM 磨砂 + 圆角裁剪
+    # ------------------------------------------------------------------
+    def _ensure_glass(self) -> None:
+        """开磨砂（只在第一次显示时做一次）。"""
+        if self._glass_ready:
+            return
+        self._glass_ready = True
+        self._glass_mode = acrylic.enable_blur(
+            self, radius=theme_mod.GLASS_RADIUS,
+            tint=GLASS_TINT, opacity=GLASS_TINT_ALPHA)
+        config.log(f"主面板磨砂：{self._glass_mode or '不可用，退回纯半透明'}"
+                   f"（{acrylic.describe()}）")
+        self._restyle()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._ensure_glass()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        # SetWindowRgn 不会跟着窗口缩放，尺寸一变就得重新裁一次
+        if self._glass_mode:
+            acrylic.apply_round_region(self, theme_mod.GLASS_RADIUS)
+
+    # ------------------------------------------------------------------
+    # 拖动 / 快捷键
+    # ------------------------------------------------------------------
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        """无边框窗口没有标题栏，按住卡片空白处就能把它拖走。"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = (event.globalPosition().toPoint()
+                                 - self.frameGeometry().topLeft())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_offset)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        self._drag_offset = None
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_Escape:
+            self.hide()
+            return
+        super().keyPressEvent(event)
 
     def show_notice(self, text: str) -> None:
         if not text:

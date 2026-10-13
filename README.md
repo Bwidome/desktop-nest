@@ -93,6 +93,33 @@
 
 ---
 
+## 主面板（悬浮磨砂玻璃卡片）
+
+![主面板](shots/panel-main.png)
+
+托盘**双击**（或底栏右键 →「打开主面板」）打开的窗口，用来看全局、做决定。
+它不是普通的白色矩形弹窗，而是一块**浮在桌面之上的半透明磨砂玻璃卡片**：
+
+| 特性 | 说明 |
+| --- | --- |
+| **磨砂玻璃** | 背后是真的被模糊掉了，不是画上去的假半透明。由 DWM 的亚克力/模糊实现（`acrylic.py`），Win11 走亚克力、Win10 1803+ 走纯模糊、更老的系统自动退回"只有半透明、没有模糊" |
+| **深色半透明** | 底色恒定是深色半透明（约 0.58），**不跟明暗主题走**——浅色主题下做成白底就没有玻璃味了 |
+| **大圆角** | 22 px 圆角；窗口本体也按同一个半径裁一刀，免得模糊糊到圆角外面 |
+| **无边框** | 没有系统标题栏；**按住卡片空白处就能拖走**，`Esc` 或右上角 `✕` 收起 |
+| **不是对话框** | `FramelessWindowHint + Window`，浮在桌面图层之上，不是模态对话框 |
+
+内容：三张统计卡片（收纳面板里 / 桌面待收纳 / 常用启动）、收纳位置、`面板内容 / 操作历史` 两个标签页、
+以及底部一排操作（刷新 / 打开收纳面板 / 收纳桌面 / 还原桌面）。操作历史里选中某条可以**原样撤回**。
+
+> 两个只会在深色玻璃上暴露的坑，都写进代码注释了：
+> 1. **顶层窗口不能自己设 QSS 背景**——设了就把磨砂整块盖住，看起来就是一块不透明的板子。
+>    卡片外观一律交给子控件 `#MainCard`（和收纳面板的 `#Popup` 一个套路）。
+> 2. **`QTabWidget.setDocumentMode(True)` 会在标签栏顶上画一条"基线"**，那是原生样式用
+>    **主题位图**画的，既不吃 QSS 也不吃调色板。浅色主题下看不出来，深色玻璃上就是一道刺眼的白。
+>    解决办法是 `tabBar().setDrawBase(False)`。
+
+---
+
 ## 底部菜单栏的行为细节
 
 | 行为 | 说明 |
@@ -231,21 +258,23 @@ desktop-nest\
 ├── winlink.py              .lnk **创建**（COM IShellLinkW，虚表下标实测过）
 ├── dock.py                 底部菜单栏（含内嵌分页行）
 ├── desktop_browser.py      收纳面板（上拉菜单：分页网格 + 搜索 + 常用启动行）
-├── panel.py                主面板（统计卡片 + 内容列表 + 操作历史）
+├── panel.py                主面板（悬浮磨砂玻璃卡片：统计卡片 + 内容列表 + 操作历史）
+├── acrylic.py              Windows 磨砂玻璃（DWM 亚克力/模糊 + 圆角裁剪）
 ├── settings.py             设置窗口
 ├── engine.py               条目类型、图标解析、快捷方式二进制解析（[MS-SHLLINK]）
 ├── safety.py               安全校验：系统项、占用、路径包含
 ├── icons.py                Windows Shell 图标提取 + 缓存
 ├── textutil.py             模糊搜索与高亮区间
 ├── widgets.py              共用的图标加载器与应用图标
-├── theme.py                配色与整份 QSS
+├── theme.py                配色与整份 QSS（含 `GLASS` 玻璃配色）
 ├── qt_compat.py            Qt 加载器（自带 libs 优先）
 ├── setup_libs.py           直接下载解包 PyQt6（pip 不可用时的备用方案）
 ├── 桌面收纳.spec            PyInstaller 打包脚本（见文末「打包成 exe」）
 ├── requirements.txt        运行依赖（PyQt6）
 ├── .gitignore / .gitattributes  版本管理：忽略大件与运行期数据、统一换行符
 ├── libs\                   自带 Qt 运行库（约 215 MB，可删）
-├── dev\                    自检脚本（`run_all.py` 可一次跑完全部）
+├── shots\                  README 用的截图
+├── dev\                    自检脚本（`run_all.py` 可一次跑完全部；`shot_panel.py` 重拍主面板截图）
 └── .data\                  运行期数据：config.json / journal.jsonl / app.log
 ```
 
@@ -301,6 +330,10 @@ LF-only 的 `.bat` 在 `goto` / 多行块里可能直接跑飞，这个不是洁
   否则字号跟着 DPI 放大、写死的宽度不变，125% 缩放下「任务管理器」这类名字
   会跟相邻项叠在一起
 * 窗口图标提供 16 ~ 256 共 7 种尺寸，小图标位上也不会糊
+* **主面板的圆角裁剪要自己乘 `devicePixelRatio`**——`SetWindowRgn` 收的是物理像素，
+  而 Qt 的 `width()/height()` 是逻辑像素。漏乘的话 125% 缩放下窗口会被裁小一圈，
+  右下角连按钮都显示不出来（dpr=1 的机器上完全正常，所以这条专门写了自检）。
+  换算抽成了 `acrylic.region_metrics()` 这个纯函数，`dev/test_panel_glass.py` 直接钉住它
 
 > 如果看着还是偏小或偏大，可以在「设置 → 外观与启动」里调图标大小；
 > 字体跟随系统缩放，不用额外设定。
@@ -367,7 +400,7 @@ pyinstaller 桌面收纳.spec --noconfirm
 **推荐：一键跑完全部**
 
 ```bat
-python dev\run_all.py              :: 自动挑一个能加载 PyQt6 的解释器，六套依次跑完并汇总
+python dev\run_all.py              :: 自动挑一个能加载 PyQt6 的解释器，七套依次跑完并汇总
 python dev\run_all.py --list       :: 只列出会跑哪些用例
 python dev\run_all.py --shots      :: 顺带让 test_nest 把界面截图存到 shots\
 python dev\run_all.py --python <解释器路径>   :: 手动指定解释器
@@ -384,14 +417,19 @@ python dev\test_move.py          :: 搬运安全性与失败回滚（13 项）
 python dev\test_icons_page.py    :: 翻页后图标不消失（回归 11 项）
 python dev\test_dock_fixes.py    :: 启动崩溃 / 常用图标 / 高亮 / 底栏尺寸 / 显隐 / 不遮挡 / 上拉面板 / 图标宽度自适应（39 项）
 python dev\test_round3.py        :: 常用图标 / 不跑出屏幕 / 窗口图标 / DPI 字体 / 让开判据（23 项）
+python dev\test_panel_glass.py   :: 主面板磨砂玻璃：高 DPI 圆角裁剪 / 标签栏白线 / 玻璃样式 / 回退（39 项）
 python dev\test_nest.py --shots  :: 收纳主流程 / 两个桌面 / 分页 / 底栏开关 / 启动收纳退出还原（89 项）
 ```
 
-六套共 **217 项检查**，都只在临时沙盒目录里操作，**不会碰真实桌面**。
+七套共 **256 项检查**，都只在临时沙盒目录里操作，**不会碰真实桌面**。
 `--shots` 会把界面截图存到 `shots\`。
 
 > 「让开判据」那一条会读当前真实的前台窗口，所以它是**按实现里的三条规则复算期望值**
 > 再比对，而不是硬编码一个面积阈值——否则前台窗口占比落在阈值中间区间时必然误报。
+
+> `test_panel_glass.py` 里有两条是专门盯"只有真机上才看得见"的坑：高 DPI 下窗口被裁小、
+> 以及深色玻璃上那条标签栏白线。前者靠 `acrylic.region_metrics()` 这个纯函数钉死换算，
+> 后者直接渲染一遍、扫描"横贯全宽的不透明浅色行"。
 
 辅助脚本（排查用）：
 
@@ -399,7 +437,12 @@ python dev\test_nest.py --shots  :: 收纳主流程 / 两个桌面 / 分页 / �
 python winlink.py                  :: 实机验证快捷方式**创建**（写一个 .lnk 再解析回来）
 python dev\probe_vtable.py         :: 实测 IShellLinkW 虚表下标（用官方 COM 对账）
 python dev\read_lnk.ps1            :: 用 Windows 官方 WScript.Shell 读 .lnk 属性（给上面两个对账用）
+python dev\shot_panel.py           :: 重拍主面板截图（磨砂是 DWM 做的，必须真显示窗口再截屏）
 ```
+
+> `dev\shot_panel.py` 为什么要"真显示再截屏"：磨砂模糊发生在 **DWM 合成阶段**，
+> Qt 自己 `grab()` 出来的图里**没有模糊**。所以脚本会先摆一块高对比背景板，
+> 把窗口真显示出来，再截整屏裁出面板。
 
 ### 关于 COM 虚表下标（不要凭记忆猜）
 

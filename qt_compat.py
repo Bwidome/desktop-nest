@@ -36,8 +36,8 @@ try:
         Qt, QThread, QTimer, pyqtSignal as Signal,
     )
     from PyQt6.QtGui import (  # noqa: F401
-        QAction, QColor, QFont, QFontMetrics, QIcon, QImage, QPainter,
-        QPainterPath, QPixmap,
+        QAction, QColor, QFont, QFontMetrics, QIcon, QImage, QLinearGradient,
+        QPainter, QPainterPath, QPalette, QPixmap, QRadialGradient,
     )
     from PyQt6.QtWidgets import (  # noqa: F401
         QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
@@ -57,8 +57,8 @@ except ImportError as exc:  # pragma: no cover
             Qt, QThread, QTimer, Signal,
         )
         from PySide6.QtGui import (  # type: ignore  # noqa: F401
-            QAction, QColor, QFont, QFontMetrics, QIcon, QImage, QPainter,
-            QPainterPath, QPixmap,
+            QAction, QColor, QFont, QFontMetrics, QIcon, QImage, QLinearGradient,
+            QPainter, QPainterPath, QPalette, QPixmap, QRadialGradient,
         )
         from PySide6.QtWidgets import (  # type: ignore  # noqa: F401
             QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
