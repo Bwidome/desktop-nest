@@ -1,0 +1,8 @@
+# 桌面收纳 —— 运行依赖
+#
+# 必装：Qt 界面库（PyQt6；也可用 PySide6，qt_compat 会自动识别）
+#   如果 pip 不可用，可改用 `python setup_libs.py` 把 PyQt6 下载到 libs/ 目录
+PyQt6>=6.5
+
+# 可选：给图标磁盘缓存做 PNG 编解码（缺了也能跑，只是缓存不落盘）
+# Pillow>=10.0

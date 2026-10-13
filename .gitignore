@@ -1,0 +1,39 @@
+# ---- 自带 Qt 运行库（约 215 MB，可用 安装依赖.bat 重新生成）----
+libs/
+
+# ---- 打包产物 ----
+build/
+build-new/
+dist/
+dist-new/
+*.manifest
+
+# ---- 运行期数据（配置 / 流水 / 日志 / 图标缓存）----
+.data/
+.desktop-nest/
+.icon-cache/
+*.log
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+
+# ---- 临时 / 工具 ----
+.tmp/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+selftest-result.txt
+crash.log
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.workbuddy-ai/
+Thumbs.db
+desktop.ini
