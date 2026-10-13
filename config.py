@@ -26,6 +26,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import winlink
+
 APP_NAME = "桌面收纳"
 APP_NAME_FULL = "桌面收纳美化工具"
 VERSION = "1.0.0"
@@ -318,66 +320,24 @@ def _write_startup_shortcut(entry_script: "Path | None" = None) -> bool:
 
     有些环境不允许写 HKCU\\...\\Run（被安全软件或权限策略拦住），
     但「启动」文件夹一定能用，效果一样。
+
+    快捷方式的写法统一走 `winlink.create_shortcut`——COM 虚表下标只有那一处
+    定义，避免两处各抄一份、日后改下标时悄悄不同步。
     """
     script = entry_script or (default_project_dir() / "main.py")
     link = _startup_shortcut()
     try:
         link.parent.mkdir(parents=True, exist_ok=True)
-        import ctypes
-        from ctypes import wintypes
-
-        class GUID(ctypes.Structure):
-            _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort),
-                        ("Data3", ctypes.c_ushort), ("Data4", ctypes.c_ubyte * 8)]
-
-        ctypes.windll.ole32.CoInitialize(None)
-        clsid = GUID()
-        ctypes.oledll.ole32.CLSIDFromString("{00021401-0000-0000-C000-000000000046}",
-                                            ctypes.byref(clsid))
-        iid = GUID()
-        ctypes.oledll.ole32.CLSIDFromString("{00021401-0000-0000-C000-000000000046}",
-                                            ctypes.byref(iid))
-        ptr = ctypes.c_void_p()
-        # IShellLinkW
-        iid_link = GUID()
-        ctypes.oledll.ole32.CLSIDFromString("{000214F9-0000-0000-C000-000000000046}",
-                                            ctypes.byref(iid_link))
-        if ctypes.windll.ole32.CoCreateInstance(
-                ctypes.byref(clsid), None, 1, ctypes.byref(iid_link),
-                ctypes.byref(ptr)) != 0:
-            return False
-        vtbl = ctypes.cast(ptr, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
-
-        def method(index, *argtypes):
-            proto = ctypes.WINFUNCTYPE(ctypes.HRESULT, ctypes.c_void_p, *argtypes)
-            return proto(vtbl[index])
-
-        set_path = method(20, wintypes.LPCWSTR)          # IShellLinkW::SetPath
-        set_args = method(11, wintypes.LPCWSTR)          # SetArguments
-        set_workdir = method(9, wintypes.LPCWSTR)        # SetWorkingDirectory
-        set_icon = method(17, wintypes.LPCWSTR, ctypes.c_int)  # SetIconLocation
-        set_desc = method(7, wintypes.LPCWSTR)           # SetDescription
-        query = ptr  # IShellLinkW 转 IPersistFile 需要 QueryInterface，简化处理
-
-        set_path(ptr, _pythonw())
-        set_args(ptr, f'"{script}" --silent')
-        set_workdir(ptr, str(script.parent))
-        set_icon(ptr, _pythonw(), 0)
-        set_desc(ptr, APP_NAME_FULL)
-
-        iid_file = GUID()
-        ctypes.oledll.ole32.CLSIDFromString("{0000010b-0000-0000-C000-000000000046}",
-                                            ctypes.byref(iid_file))
-        persist = ctypes.c_void_p()
-        query_interface = ctypes.WINFUNCTYPE(ctypes.HRESULT, ctypes.c_void_p,
-                                             ctypes.c_void_p,
-                                             ctypes.POINTER(ctypes.c_void_p))(vtbl[0])
-        if query_interface(ptr, ctypes.byref(iid_file), ctypes.byref(persist)) != 0:
-            return False
-        pvtbl = ctypes.cast(persist, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
-        save = ctypes.WINFUNCTYPE(ctypes.HRESULT, ctypes.c_void_p, wintypes.LPCWSTR,
-                                  ctypes.c_int)(pvtbl[6])       # IPersistFile::Save
-        ok = save(persist, str(link), 1) == 0
+        pythonw = _pythonw()
+        ok, reason = winlink.create_shortcut(
+            link,
+            pythonw,
+            arguments=f'"{script}" --silent',
+            icon_path=pythonw,
+            working_dir=str(script.parent),
+        )
+        if not ok:
+            log(f"写启动文件夹快捷方式失败：{reason}")
         return bool(ok and link.exists())
     except Exception as exc:
         log(f"写启动文件夹快捷方式失败：{exc}")

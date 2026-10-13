@@ -38,7 +38,7 @@ import nest
 import theme as theme_mod
 from textutil import fuzzy_match
 from widgets import (IconLoader, PLACEHOLDER_COLORS, app_icon, icon_hint_for,
-                      letter_pixmap, pixmap_for, set_widget_icon)
+                      letter_pixmap, pixmap_for)
 
 GRID_ICON = 48
 ICON_REQUEST = 64              # 向 Windows 要更大的图标再缩，清晰得多
@@ -175,18 +175,19 @@ class DesktopBrowser(QWidget):
         self._page = 0
         self._per_page = int(cfg.get("page_size", DEFAULT_PER_PAGE) or DEFAULT_PER_PAGE)
         self._selected: "engine.RepoItem | None" = None
-        self._drag_offset = None
 
-        # 注意：这里**故意不加 WindowStaysOnTopHint**。
-        # 面板是"用到才开"的窗口；如果永远压在别的程序上面，会挡住你正在做的事。
-        # 不加这个标志后，点别的窗口它会正常让到后面，需要时用托盘图标或
-        # Dock 上的按钮叫回来即可。（Dock 那条菜单栏是常驻工具，它才需要置顶。）
+        # 这是一个**上拉菜单**，不是应用窗口：
+        # * Tool —— 不进任务栏、不进 Alt+Tab，和弹出菜单一个待遇
+        # * 不加 WindowStaysOnTopHint —— 点别的程序它会正常让到后面，不挡事
+        # * 半透明背景 + 大圆角，贴在屏幕底部、菜单栏上方，像从底下拉出来的一块面板
+        # 随时可以从底部菜单栏的「桌面整理」、托盘图标或托盘菜单再叫出来 / 收起来。
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint |
-                            Qt.WindowType.Window)
+                            Qt.WindowType.Tool |
+                            Qt.WindowType.NoDropShadowWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setWindowTitle("桌面收纳 · 主面板")
+        self.setWindowTitle("桌面收纳 · 收纳面板")
         self.setWindowIcon(app_icon())          # 左上角/任务栏要有个像样的图标
-        self.setMinimumSize(600, 420)
+        self.setMinimumSize(560, 360)
 
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
@@ -497,8 +498,9 @@ class DesktopBrowser(QWidget):
             if widget is not None:
                 widget.deleteLater()
         self._tiles = []
-        self.loader.discard_pending()
-        self._rebuild_apps()
+        # 只丢弃"上一页那些卡片"的排队请求；常用启动那一排的请求要留着，
+        # 否则翻页会把它们还没取到图标的请求一起清掉，那排就永远是占位色块。
+        self.loader.discard_pending(keep=lambda key: key.startswith("app:"))
 
         start = self._page * self._per_page
         page_items = self._matches[start:start + self._per_page]
@@ -718,32 +720,65 @@ class DesktopBrowser(QWidget):
     # ------------------------------------------------------------------
     def show_window(self) -> None:
         self.refresh_from_disk()
+        self.reposition()
         self.show()
         self.raise_()
         self.activateWindow()
         self.search.setFocus()
 
+    def toggle_window(self) -> None:
+        """打开 / 收起面板。
+
+        Dock 上的「桌面整理」和托盘左键都走这里——再点一次就收起来，
+        符合"上拉菜单"的直觉（而不是弹出一个只能点 ✕ 关掉的应用窗口）。
+        """
+        if self.isVisible():
+            self.hide()
+        else:
+            self.show_window()
+
+    def reposition(self) -> None:
+        """贴到屏幕底部正中、底部菜单栏上方。
+
+        上拉菜单的观感：底边对齐、水平居中；同时保证整块面板不会跑到屏幕外
+        （屏幕小或面板大时先压缩尺寸，再夹住坐标）。
+        """
+        screen = self.screen().availableGeometry()
+        max_width = max(560, screen.width() - 60)
+        max_height = max(320, screen.height() - 140)
+        width = min(self.width(), max_width)
+        height = min(self.height(), max_height)
+        if (width, height) != (self.width(), self.height()):
+            self.resize(width, height)
+
+        x = screen.center().x() - width // 2
+        x = max(screen.left() + 12, min(x, screen.right() - width - 12))
+        # 给底部菜单栏留出空间，面板正好"坐在"它上面
+        y = screen.bottom() - height - 84
+        y = max(screen.top() + 12, y)
+        self.move(x, y)
+
     def _restore_geometry(self) -> None:
+        """只恢复**大小**；位置永远由 reposition() 贴底决定。"""
         raw = str(self.cfg.get("panel_geometry") or "")
+        width = height = 0
         if raw:
             parts = raw.split(",")
             if len(parts) == 4:
                 try:
-                    x, y, w, h = (int(p) for p in parts)
-                    self.setGeometry(x, y, max(600, w), max(420, h))
-                    return
+                    _x, _y, width, height = (int(p) for p in parts)
                 except ValueError:
-                    pass
-        screen = self.screen().availableGeometry()
-        width, height = min(920, screen.width() - 80), min(600, screen.height() - 160)
-        self.resize(width, height)
-        self.move(screen.center().x() - width // 2,
-                  screen.top() + max(50, (screen.height() - height) // 3))
+                    width = height = 0
+        if width <= 0 or height <= 0:
+            screen = self.screen().availableGeometry()
+            width = min(880, max(560, screen.width() - 120))
+            height = 460
+        self.resize(max(560, width), max(360, height))
+        self.reposition()
 
     def _save_geometry(self) -> None:
-        geometry = self.geometry()
         self.cfg.set("panel_geometry",
-                     f"{geometry.x()},{geometry.y()},{geometry.width()},{geometry.height()}")
+                     f"{self.x()},{self.y()},{self.width()},{self.height()}")
 
     def hideEvent(self, event) -> None:  # noqa: N802
         self._save_geometry()
@@ -781,25 +816,6 @@ class DesktopBrowser(QWidget):
             self.search.setFocus()
             return
         super().keyPressEvent(event)
-
-    def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton:
-            pos = event.position().toPoint()
-            if pos.y() <= self.toolbar.height() + 4:
-                self._drag_offset = (event.globalPosition().toPoint()
-                                     - self.frameGeometry().topLeft())
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        if self._drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
-            self.move(event.globalPosition().toPoint() - self._drag_offset)
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        if self._drag_offset is not None:
-            self._drag_offset = None
-            self._save_geometry()
-        super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event) -> None:  # noqa: N802
         """Ctrl + 滚轮翻页；普通滚轮留给滚动条。"""

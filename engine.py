@@ -20,14 +20,12 @@
 
 from __future__ import annotations
 
-import json
 import os
-import shutil
 import struct
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable
 
 import config
 import safety
@@ -125,58 +123,9 @@ class RepoItem:
         return self.source == "public"
 
 
-@dataclass
-class OperationResult:
-    """一次迁移 / 还原的结果。"""
-
-    moved: int = 0
-    failed: "list[tuple[str, str]]" = field(default_factory=list)   # (名称, 原因)
-    skipped: "list[tuple[str, str]]" = field(default_factory=list)   # (名称, 原因)
-    cancelled: bool = False
-    duration: float = 0.0
-
-    @property
-    def total_handled(self) -> int:
-        return self.moved
-
-    def summary(self) -> str:
-        parts = []
-        if self.moved:
-            parts.append(f"成功 {self.moved} 项")
-        if self.failed:
-            parts.append(f"失败 {len(self.failed)} 项")
-        if self.skipped:
-            parts.append(f"跳过 {len(self.skipped)} 项")
-        if self.cancelled:
-            parts.append("已中断")
-        return "，".join(parts) if parts else "没有任何改动"
-
-
 # --------------------------------------------------------------------------
 # 扫描
 # --------------------------------------------------------------------------
-def scan_desktop(desktop: Path) -> "tuple[list[RepoItem], list[tuple[str, str]]]":
-    """扫描桌面，返回 (可收纳条目, [(跳过的名称, 原因)])。"""
-    items: "list[RepoItem]" = []
-    blocked: "list[tuple[str, str]]" = []
-    if not safety.safe_exists(desktop):
-        return items, blocked
-    for entry in sorted(desktop.iterdir(), key=lambda p: p.name.lower()):
-        try:
-            verdict = safety.check_desktop_item(entry)
-            if not verdict.allowed:
-                blocked.append((entry.name, verdict.reason))
-                continue
-            stat = entry.stat()
-            is_dir = entry.is_dir()
-            size = 0 if is_dir else stat.st_size
-            items.append(RepoItem(entry, entry.name, is_dir, kind_of(entry), size,
-                                  stat.st_mtime))
-        except OSError as exc:
-            blocked.append((entry.name, f"无法读取：{exc}"))
-    return items, blocked
-
-
 def list_desktop_items(desktop: Path, *, include_hidden: bool = False
                        ) -> "tuple[list[RepoItem], list[tuple[str, str]]]":
     """列出桌面上的全部条目，**文件夹也照列**（给底部菜单栏的分页浏览用）。
@@ -408,103 +357,6 @@ def _volume_root(data: bytes, start: int, volume_id_offset: int) -> str:
     if drive_type == 4:
         return "\\\\" + label                     # DRIVE_REMOTE，NetBIOS 名
     return ""
-
-
-# --------------------------------------------------------------------------
-# 迁移 / 还原
-# --------------------------------------------------------------------------
-
-
-# --------------------------------------------------------------------------
-# 撤销流水
-# --------------------------------------------------------------------------
-def journal_path() -> Path:
-    return config.data_dir() / "journal.jsonl"
-
-
-def _append_journal(record: dict) -> None:
-    try:
-        with journal_path().open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except OSError as exc:
-        config.log(f"写入流水失败：{exc}")
-
-
-def read_journal(limit: int = 50) -> "list[dict]":
-    path = journal_path()
-    if not safety.safe_exists(path):
-        return []
-    records: "list[dict]" = []
-    try:
-        with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-    except OSError:
-        return []
-    records.sort(key=lambda r: r.get("time", 0), reverse=True)
-    return records[:limit]
-
-
-def undo_record(record: dict, *, progress: "Progress | None" = None) -> OperationResult:
-    """按流水把一次操作整体撤回去（逆序搬回）。"""
-    started = time.time()
-    result = OperationResult()
-    moves = record.get("moves", [])
-    total = len(moves)
-    for index, move in enumerate(reversed(moves), start=1):
-        if progress:
-            progress(index, total, Path(move["from"]).name)
-        source, target = Path(move["from"]), Path(move["to"])
-        try:
-            if not safety.safe_exists(source):
-                result.failed.append((source.name, "源文件已不存在"))
-                continue
-            _move_path(source, target)
-            result.moved += 1
-        except OSError as exc:
-            result.failed.append((source.name, str(exc)))
-    result.duration = time.time() - started
-    return result
-
-
-def drop_journal_record(timestamp: float) -> int:
-    """撤销成功后把该条流水删掉，避免重复撤销。"""
-    path = journal_path()
-    if not safety.safe_exists(path):
-        return 0
-    kept: "list[str]" = []
-    try:
-        with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if abs(float(rec.get("time", -1)) - float(timestamp)) < 0.0005:
-                    continue
-                kept.append(json.dumps(rec, ensure_ascii=False))
-        path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
-    except OSError:
-        return -1
-    return len(kept)
-
-
-def clear_journal() -> bool:
-    try:
-        if safety.safe_exists(journal_path()):
-            journal_path().unlink()
-        return True
-    except OSError:
-        return False
 
 
 def open_in_explorer(path: Path) -> None:

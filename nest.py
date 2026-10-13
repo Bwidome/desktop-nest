@@ -199,9 +199,6 @@ def sync_system_links(links: "list[SystemLink] | None" = None) -> "list[SystemLi
             if not ok:
                 config.log(f"创建系统位置快捷方式失败 {entry.name}：{reason}")
                 continue
-        if entry.icon_source and entry.icon_source.lower().endswith(".exe"):
-            # 让图标固定指向 explorer.exe 里那张标准图标
-            pass
         mapping[entry.name] = entry.shell_path
         result.append(SystemLink(entry.name, entry.shell_path, entry.icon_source, link))
 
@@ -209,10 +206,18 @@ def sync_system_links(links: "list[SystemLink] | None" = None) -> "list[SystemLi
     return result
 
 
+def shell_path_map() -> "dict[str, str]":
+    """一次读出「快捷方式名 → shell 位置」的完整映射。
+
+    调用方在循环里逐条判断时应该先取一次这个映射，
+    而不是每条都调 shell_path_for()——那会让每个条目都去读一遍 links.json。
+    """
+    return _read_manifest()
+
+
 def shell_path_for(link: Path) -> str:
     """查一个快捷方式对应的 shell 位置（`::{CLSID}`），没有就返回空串。"""
-    mapping = _read_manifest()
-    return mapping.get(Path(link).stem, "")
+    return shell_path_map().get(Path(link).stem, "")
 
 
 def open_system_link(link: Path) -> "tuple[bool, str]":
@@ -279,6 +284,8 @@ def list_nest_items() -> "list":
 
     items: "list" = []
     store = desktop_store()
+    # 来源清单只读一次——逐条去读会让 N 个条目产生 N 次文件读取
+    sources = read_sources()
     if safety.safe_exists(store):
         try:
             entries = sorted(store.iterdir(),
@@ -296,7 +303,7 @@ def list_nest_items() -> "list":
                     entry, entry.name, is_dir, engine.kind_of(entry),
                     0 if is_dir else safety.safe_size(entry),
                     safety.safe_mtime(entry), entry.name,
-                    source_of(entry.name)))
+                    sources.get(entry.name, "")))
             except OSError:
                 continue
 
@@ -321,6 +328,8 @@ class MoveResult:
     skipped: "list[tuple[str, str]]" = field(default_factory=list)
     cancelled: bool = False
     duration: float = 0.0
+    # 实际发生的搬移 (原路径, 现路径)，用于写操作流水、支持整批撤销
+    moves: "list[tuple[str, str]]" = field(default_factory=list)
 
     def summary(self) -> str:
         parts = []
@@ -442,11 +451,22 @@ def take_from_desktop(desktop: Path, *, progress: "Progress | None" = None,
     ensure_dirs()
     store = desktop_store()
 
+    # 安全底线：收纳目录绝不能和桌面互相包含，否则会自己搬自己
+    if safety.is_subpath(store, desktop) or safety.is_subpath(desktop, store):
+        result.failed.append(
+            ("（配置）", "收纳目录不能设在桌面里面，否则会自己搬自己"))
+        return result
+
     if items is None:
         entries, blocked = list_desktop(desktop, include_public=include_public)
         result.skipped.extend(blocked)
     else:
         entries = list(items)
+
+    # 来源清单只在开始时读一次、结束时写一次：
+    # 逐条读+写会让 N 个条目产生 2N 次整文件 IO
+    sources = read_sources()
+    sources_dirty = False
 
     total = len(entries)
     for index, item in enumerate(entries, start=1):
@@ -469,9 +489,15 @@ def take_from_desktop(desktop: Path, *, progress: "Progress | None" = None,
             stem, suffix = Path(target_name).stem, Path(target_name).suffix
             target_name = f"{stem}（公用）{suffix}"
         try:
-            _move(source, store / target_name)
-            # 记下它原来在哪个桌面，还原时才能送回原处
-            remember_source(target_name, getattr(item, "source", ""))
+            final = _move(source, store / target_name)
+            # 记下它原来在哪个桌面，还原时才能送回原处（按实际落地的文件名记）
+            origin = getattr(item, "source", "")
+            if origin:
+                sources[final.name] = origin
+            else:
+                sources.pop(final.name, None)
+            sources_dirty = True
+            result.moves.append((str(source), str(final)))
             result.moved += 1
         except PermissionError:
             result.failed.append((item.name, "被占用或无权限，请关闭正在使用它的程序"))
@@ -479,6 +505,12 @@ def take_from_desktop(desktop: Path, *, progress: "Progress | None" = None,
             result.failed.append((item.name, str(exc)))
         except Exception as exc:
             result.failed.append((item.name, f"意外错误：{exc}"))
+
+    if sources_dirty:
+        write_sources(sources)
+    if result.moves:
+        _append_journal({"time": started, "action": "take",
+                         "count": len(result.moves), "moves": result.moves})
 
     result.duration = time.time() - started
     return result
@@ -509,6 +541,9 @@ def restore_to_desktop(desktop: Path, *, progress: "Progress | None" = None,
         return result
 
     total = len(entries)
+    # 来源清单读一次、写一次（理由同 take_from_desktop）
+    sources = read_sources()
+    sources_dirty = False
     for index, entry in enumerate(entries, start=1):
         if should_cancel and should_cancel():
             result.cancelled = True
@@ -516,22 +551,28 @@ def restore_to_desktop(desktop: Path, *, progress: "Progress | None" = None,
         if progress:
             progress(index, total, entry.name)
         # 送回原处；公共桌面不可写时退回个人桌面，至少不把文件丢了
-        origin = desktop_for_source(source_of(entry.name))
+        origin = desktop_for_source(sources.get(entry.name, ""))
         target_name = entry.name
         if origin != desktop and "（公用）" in entry.name:
             target_name = entry.name.replace("（公用）", "")   # 去掉区分用后缀
         try:
             if not safety.safe_exists(origin):
                 origin.mkdir(parents=True, exist_ok=True)
-            _move(entry, origin / target_name)
-            forget_source(entry.name)
+            final = _move(entry, origin / target_name)
+            if entry.name in sources:
+                sources.pop(entry.name, None)
+                sources_dirty = True
+            result.moves.append((str(entry), str(final)))
             result.moved += 1
         except PermissionError:
             if origin != desktop:
                 # 公共桌面写不进去（需要管理员），退回个人桌面并说明
                 try:
-                    _move(entry, desktop / target_name)
-                    forget_source(entry.name)
+                    final = _move(entry, desktop / target_name)
+                    if entry.name in sources:
+                        sources.pop(entry.name, None)
+                        sources_dirty = True
+                    result.moves.append((str(entry), str(final)))
                     result.moved += 1
                     result.skipped.append(
                         (entry.name, "公共桌面不可写，已放回个人桌面"))
@@ -544,6 +585,12 @@ def restore_to_desktop(desktop: Path, *, progress: "Progress | None" = None,
             result.failed.append((entry.name, str(exc)))
         except Exception as exc:
             result.failed.append((entry.name, f"意外错误：{exc}"))
+
+    if sources_dirty:
+        write_sources(sources)
+    if result.moves:
+        _append_journal({"time": started, "action": "restore",
+                         "count": len(result.moves), "moves": result.moves})
 
     result.duration = time.time() - started
     return result
@@ -568,14 +615,18 @@ def restore_item_to_desktop(desktop: Path, item) -> "tuple[bool, str]":
     try:
         if not safety.safe_exists(origin):
             origin.mkdir(parents=True, exist_ok=True)
-        _move(source, origin / target_name)
+        final = _move(source, origin / target_name)
         forget_source(source.name)
+        _append_journal({"time": time.time(), "action": "restore",
+                         "count": 1, "moves": [(str(source), str(final))]})
         return True, ""
     except PermissionError:
         # 公共桌面写不进去就退回个人桌面，不把文件卡在收纳目录里
         try:
-            _move(source, desktop / target_name)
+            final = _move(source, desktop / target_name)
             forget_source(source.name)
+            _append_journal({"time": time.time(), "action": "restore",
+                             "count": 1, "moves": [(str(source), str(final))]})
             return True, "公共桌面不可写，已放回个人桌面"
         except OSError as exc:
             return False, f"公共桌面与个人桌面都写不进去：{exc}"
@@ -598,6 +649,112 @@ def desktop_item_count(desktop: Path) -> int:
     """真实桌面上还剩多少可收纳的东西。"""
     items, _blocked = list_desktop(desktop)
     return len(items)
+
+
+# --------------------------------------------------------------------------
+# 操作流水（写进 journal.jsonl，主面板里选中某条即可原样撤回）
+# --------------------------------------------------------------------------
+def journal_path() -> Path:
+    return config.data_dir() / "journal.jsonl"
+
+
+def _append_journal(record: "dict") -> None:
+    """追加一条操作流水。
+
+    流水只用于「事后可撤销」，写失败不该影响搬移本身，所以这里吞掉异常。
+    """
+    try:
+        with journal_path().open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        config.log(f"写入流水失败：{exc}")
+
+
+def read_journal(limit: int = 50) -> "list[dict]":
+    """读出最近的若干条流水（按时间倒序）。"""
+    path = journal_path()
+    if not safety.safe_exists(path):
+        return []
+    records: "list[dict]" = []
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return []
+    records.sort(key=lambda r: r.get("time", 0), reverse=True)
+    return records[:limit]
+
+
+def undo_record(record: "dict", *, progress: "Progress | None" = None) -> MoveResult:
+    """按流水把一次操作整体撤回去（**逆序**搬回）。
+
+    逆序很关键：一次操作里可能出现「A 搬到 B、B 又被改名」这类链式变化，
+    倒着来才能让每个条目回到它当时的位置。
+    """
+    started = time.time()
+    result = MoveResult()
+    moves = list(record.get("moves") or [])
+    total = len(moves)
+    for index, move in enumerate(reversed(moves), start=1):
+        if not isinstance(move, (list, tuple)) or len(move) != 2:
+            continue
+        source, target = Path(move[0]), Path(move[1])
+        if progress:
+            progress(index, total, source.name)
+        if not safety.safe_exists(target):
+            result.failed.append((source.name, "文件已不在当前位置"))
+            continue
+        try:
+            final = _move(target, source)
+            forget_source(target.name)
+            result.moves.append((str(target), str(final)))
+            result.moved += 1
+        except OSError as exc:
+            result.failed.append((source.name, str(exc)))
+    result.duration = time.time() - started
+    return result
+
+
+def drop_journal_record(timestamp: float) -> int:
+    """撤销成功后把该条流水删掉，避免重复撤销。返回剩余条数。"""
+    path = journal_path()
+    if not safety.safe_exists(path):
+        return 0
+    kept: "list[str]" = []
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if abs(float(rec.get("time", -1)) - float(timestamp)) < 0.0005:
+                    continue
+                kept.append(json.dumps(rec, ensure_ascii=False))
+        path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+    except OSError:
+        return -1
+    return len(kept)
+
+
+def clear_journal() -> bool:
+    """清空全部流水。"""
+    try:
+        if safety.safe_exists(journal_path()):
+            journal_path().unlink()
+        return True
+    except OSError:
+        return False
 
 
 # --------------------------------------------------------------------------

@@ -224,11 +224,8 @@ def _shell_icon(path: Path, size: int) -> "RawIcon | None":
         flags_used |= SHGFI_USEFILEATTRIBUTES
         attributes = FILE_ATTRIBUTE_DIRECTORY if path.suffix == "" else FILE_ATTRIBUTE_NORMAL
 
-    if path.suffix.lower() == ".exe" and exists:
-        icon_path = str(path)
-    else:
-        # SHGFI 会自己解析 .lnk / .url；给文件夹时直接给路径
-        icon_path = str(path)
+    # SHGFI 会自己解析 .lnk / .url；给文件夹或 exe 时直接给路径
+    icon_path = str(path)
 
     result = shell32.SHGetFileInfoW(icon_path, attributes, ctypes.byref(info),
                                     ctypes.sizeof(info), flags_used)

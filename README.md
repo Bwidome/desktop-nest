@@ -52,7 +52,7 @@
 | 位置 | 操作 |
 | --- | --- |
 | **分页行** | 每页 7 个，**快捷方式图标 + 下方名称**；点一下直接打开；`◀ ▶` 翻页，右侧显示 `当前页/总页数` |
-| **第一个控件「桌面整理」** | 打开完整的收纳面板（分页 + 搜索 + 还原） |
+| **第一个控件「桌面整理」** | **上拉 / 收起收纳面板**（分页 + 搜索 + 还原）；再点一次收起，等同托盘左键单击 |
 | 主行的常用启动项 | 图标 + 名称，单击直接启动 |
 | `＋` | 从收纳内容里选、或浏览文件，加进常用启动 |
 | `▼` / `▲` | **收起 / 展开上面那排分页行**（菜单栏变矮，只剩常用启动那一行）。状态会记住 |
@@ -66,9 +66,23 @@
 
 ---
 
-## 收纳面板（点「桌面整理」）
+## 收纳面板（上拉菜单窗口）
 
 ![收纳面板](shots/panel.png)
+
+点底栏的「桌面整理」，面板会从**屏幕底部正中向上拉出**；**再点一次就收起来**。
+它不是那种弹出来、必须点 `✕` 才能关掉的应用窗口，而是一块**贴着底栏的浮层**：
+
+| 特性 | 说明 |
+| --- | --- |
+| **随时开合** | 底栏「桌面整理」、托盘**左键单击**都能开关；面板里按 `Esc` 也能收起 |
+| **背景半透明** | 面板底色带透明度（浅色 90% / 深色 92%），能透出后面的桌面，和底栏同一套视觉 |
+| **贴底弹出** | 固定在屏幕底部正中、底栏上方 84 px 处；窗口小或面板大时自动压缩尺寸并夹住坐标，**不会跑出屏幕** |
+| **无边框、不占任务栏** | `FramelessWindowHint + Tool`：没有标题栏，也不会在任务栏多出一个"应用" |
+| **不能拖动** | 位置固定（省得拖丢、拖出屏幕）；**只有尺寸会被记住** |
+| **不置顶** | 没有 `WindowStaysOnTopHint`，点别的程序它会正常让到后面 |
+
+内容：
 
 * **图标 + 下方名称**的网格显示
 * **分页**：默认 7 列 × 4 行 = 28 个/页，底部 `⏮ ‹ 1/2 › ⏭`；也支持 `PageUp/PageDown`、`Ctrl+滚轮`
@@ -177,7 +191,8 @@ C:\Users\<你>\.desktop-nest\
 | **系统项保护** | `desktop.ini`、`Thumbs.db`、隐藏文件、`~$` 临时文件、`.crdownload` 半成品一律不动 |
 | **失败可解释** | 被独占占用时预判为跳过并说明原因；只读文件正常收纳、不会误判 |
 | **退出必还原** | 即使异常退出，下次启动也会先把上次没收完的还原回去 |
-| **全程可撤销** | 每次操作写 JSONL 流水，主面板「操作历史」里可整批撤销 |
+| **全程可撤销** | 每次收纳 / 还原都写一条 JSONL 流水；主面板「操作历史」里选中某条即可**原样撤回**（逆序搬回），也可以清空历史 |
+| **逆序撤销** | 一次操作里可能出现「A 搬到 B、B 又被改名」这类链式变化，倒着搬才能让每个条目回到它当时的位置 |
 
 ---
 
@@ -210,30 +225,53 @@ desktop-nest\
 ├── fix_public_desktop.py   公共桌面修复的实现
 ├── app.ico                 程序图标（快捷方式/打包都用它）
 ├── main.py                 入口
+├── config.py               配置持久化 / 路径工具 / 开机自启
 ├── tray_app.py             托盘常驻 / 启动收纳 / 退出还原 / 后台扫描
-├── nest.py                 收纳目录管理：搬运、系统位置快捷方式、图标开关
-├── winlink.py              .lnk 创建与解析（COM IShellLinkW，虚表下标实测过）
+├── nest.py                 收纳目录管理：搬运、系统位置快捷方式、图标开关、**操作流水与撤销**
+├── winlink.py              .lnk **创建**（COM IShellLinkW，虚表下标实测过）
 ├── dock.py                 底部菜单栏（含内嵌分页行）
-├── desktop_browser.py      收纳面板（分页网格 + 搜索 + 常用启动行）
-├── panel.py                主面板（统计卡片 + 内容列表 + 历史）
+├── desktop_browser.py      收纳面板（上拉菜单：分页网格 + 搜索 + 常用启动行）
+├── panel.py                主面板（统计卡片 + 内容列表 + 操作历史）
 ├── settings.py             设置窗口
-├── engine.py               条目类型、图标解析、日志流水
-├── safety.py               安全校验：系统项、占用、路径
+├── engine.py               条目类型、图标解析、快捷方式二进制解析（[MS-SHLLINK]）
+├── safety.py               安全校验：系统项、占用、路径包含
 ├── icons.py                Windows Shell 图标提取 + 缓存
 ├── textutil.py             模糊搜索与高亮区间
-├── widgets.py              共用的图标加载器
+├── widgets.py              共用的图标加载器与应用图标
 ├── theme.py                配色与整份 QSS
 ├── qt_compat.py            Qt 加载器（自带 libs 优先）
 ├── setup_libs.py           直接下载解包 PyQt6（pip 不可用时的备用方案）
-├── libs\                   自带 Qt 运行库（约 207 MB，可删）
-├── dev\                    自检脚本
+├── 桌面收纳.spec            PyInstaller 打包脚本（见文末「打包成 exe」）
+├── requirements.txt        运行依赖（PyQt6）
+├── .gitignore / .gitattributes  版本管理：忽略大件与运行期数据、统一换行符
+├── libs\                   自带 Qt 运行库（约 215 MB，可删）
+├── dev\                    自检脚本（`run_all.py` 可一次跑完全部）
 └── .data\                  运行期数据：config.json / journal.jsonl / app.log
 ```
 
-### 关于 `libs\` 这 207 MB
+### 关于 `libs\` 这 215 MB
 
 里面是 PyQt6 + Qt6 运行库。留着换台机器、换个 Python 都能直接跑；
 想省空间可以删掉，再跑一次 `安装依赖.bat` 把 PyQt6 装进系统 Python。
+
+> 注意：`libs\` 里带的是 **CPython 3.12** 的 ABI（`sip.cp312-win_amd64.pyd`）。
+> 用别的 Python 版本（比如 3.13）直接跑会 `ModuleNotFoundError: No module named 'PyQt6.sip'`。
+> `dev\run_all.py` 会自动探测一个能加载 PyQt6 的解释器，省得踩这个坑。
+
+### 版本管理（git）
+
+项目已纳入 git。**大件和运行期数据不进仓库**，规则都在 `.gitignore` 里：
+
+| 忽略 | 原因 |
+| --- | --- |
+| `libs/`（约 215 MB） | 可用 `安装依赖.bat` 重新生成 |
+| `dist/` `dist-new/` `build/` | 打包产物，随时可重建 |
+| `.data/` `.desktop-nest/` `.icon-cache/` | 运行期生成：配置、流水、日志、图标缓存 |
+| `*.log` `selftest-result.txt` | 本地排查用的临时文件 |
+
+`.gitattributes` 统一了换行符：**源码固定 LF**（`* text=auto eol=lf`，工作区就是 LF，
+git 不会再反复"预告"要改写成 CRLF）；**批处理 / PowerShell 固定 CRLF**——
+LF-only 的 `.bat` 在 `goto` / 多行块里可能直接跑飞，这个不是洁癖问题。
 
 ---
 
@@ -287,48 +325,74 @@ C:\Users\<你>\.desktop-nest\desktop     ← 你的文件都在这（找不到�
 把文件手动拷回来——它是普通文件夹，程序只是负责搬运。
 ## 打包成 exe
 
-程序本身是 Python，要真正的单文件 `.exe` 需要在**你自己的机器上**打包一次
-（我这边受限，装不上 PyInstaller）：
+程序本身是 Python，要真正的 `.exe` 需要打包一次。项目里已经写好打包脚本
+`桌面收纳.spec`，**别再手敲命令行**（手敲很容易踩到下面第 1 条坑）：
 
 ```bat
-:: 1. 装打包工具
+:: 1. 装打包工具（装进系统 Python 即可）
 python -m pip install pyinstaller
 
-:: 2. 在项目目录里打包（--noconsole 保证不弹黑窗口）
-pyinstaller --noconsole --onefile --name "桌面收纳" ^
-    --icon app.ico ^
-    --add-data "libs;libs" ^
-    main.py
+:: 2. 在项目目录里打包（用 spec，所有关键设置都在里面）
+pyinstaller 桌面收纳.spec --noconfirm
+
+:: 产物：dist\桌面收纳\桌面收纳.exe
+::       —— 整个 dist\桌面收纳 目录要一起拷走，不能只拿 exe
 ```
+
+`桌面收纳.spec` 里已经处理好的事（都是踩过的坑）：
+
+1. **`datas` 不塞 `libs/`**。`libs/` 是开发用的自带 PyQt6（约 215 MB），打包时完全不需要
+   ——PyInstaller 会从 site-packages 正确收集 PyQt6 和 Qt6 平台插件。塞进去只会多出一整套
+   重复的 Qt6 DLL（之前成品 **515 MB**，就是这个原因）。
+2. **`upx=False`**。被压缩过的 Qt DLL 容易被杀软误报，也可能触发 Windows 完整性检查导致进程直接 abort。
+3. **`console=False`**。正式版不弹黑窗口；出错时 `main.py` 会自己写日志并弹提示框，
+   所以不会出现"双击没反应又看不到原因"。
+4. **不打包运行期目录**。`.data` / `.desktop-nest` / `.icon-cache` 都是运行时生成的，
+   打进去会导致"配置被固化"。
+5. **`excludes` 剔掉用不到的大件**（QtWebEngine、QtQuick、tkinter、numpy…），能省下几百 MB。
 
 几点提醒：
 
-* **产物会很大**（100 MB 以上），因为要把 Qt6 整个塞进去。想瘦身可以用
-  `--onedir` 代替 `--onefile`，启动也更快。
+* 产物是 **onedir**（一个目录 + 一个 exe），不是单文件——启动更快，也不会有单文件版
+  每次运行先解压一遍的等待。
 * `app.ico` 已经生成好了，可以直接用；想换图标替换这个文件即可。
 * 打包后第一次运行请**先在沙盒目录里试一遍**（设置里把桌面指到临时目录），
   确认收纳 / 还原都正常再正式用。
 * 打包版和脚本版**共用同一份配置**（`~\.desktop-nest\` 与 `.data\`），可以随时互换。
 ## 开发者：自检脚本
 
+**推荐：一键跑完全部**
+
 ```bat
-python dev\test_core.py          :: 快捷方式 COM / 安全校验 / 模糊搜索（46 项）
+python dev\run_all.py              :: 自动挑一个能加载 PyQt6 的解释器，六套依次跑完并汇总
+python dev\run_all.py --list       :: 只列出会跑哪些用例
+python dev\run_all.py --shots      :: 顺带让 test_nest 把界面截图存到 shots\
+python dev\run_all.py --python <解释器路径>   :: 手动指定解释器
+python dev\run_all.py test_core test_nest     :: 只跑名字里含这些关键字的几套
+```
+
+全部通过时退出码为 `0`，任何一套失败为 `1`，方便挂到批处理或 CI 上。
+
+也可以单独跑某一套：
+
+```bat
+python dev\test_core.py          :: 快捷方式创建+二进制解析 / 安全校验 / 模糊搜索（42 项）
 python dev\test_move.py          :: 搬运安全性与失败回滚（13 项）
 python dev\test_icons_page.py    :: 翻页后图标不消失（回归 11 项）
-python dev\test_dock_fixes.py    :: 启动崩溃 / 常用图标 / 高亮 / 底栏尺寸 / 显隐 / 不遮挡（27 项）
+python dev\test_dock_fixes.py    :: 启动崩溃 / 常用图标 / 高亮 / 底栏尺寸 / 显隐 / 不遮挡 / 上拉面板（35 项）
 python dev\test_round3.py        :: 常用图标 / 不跑出屏幕 / 窗口图标 / DPI 字体 / 让开判据（23 项）
 python dev\test_nest.py --shots  :: 收纳主流程 / 两个桌面 / 分页 / 底栏开关 / 启动收纳退出还原（89 项）
 ```
 
-六套共 **209 项检查**，都只在临时沙盒目录里操作，**不会碰真实桌面**。
+六套共 **213 项检查**，都只在临时沙盒目录里操作，**不会碰真实桌面**。
 `--shots` 会把界面截图存到 `shots\`。
 
 辅助脚本（排查用）：
 
 ```bat
-python winlink.py                  :: 实机验证快捷方式创建与解析
+python winlink.py                  :: 实机验证快捷方式**创建**（写一个 .lnk 再解析回来）
 python dev\probe_vtable.py         :: 实测 IShellLinkW 虚表下标（用官方 COM 对账）
-python dev\probe_getargs.py        :: 排查读取参数的下标
+python dev\read_lnk.ps1            :: 用 Windows 官方 WScript.Shell 读 .lnk 属性（给上面两个对账用）
 ```
 
 ### 关于 COM 虚表下标（不要凭记忆猜）
@@ -338,9 +402,14 @@ python dev\probe_getargs.py        :: 排查读取参数的下标
 所以这些下标都是**实测**出来的，验证方式见 `dev\probe_vtable.py`：
 逐个下标写标记值，再用 Windows 官方的 `WScript.Shell` 读回来对账。
 
-另外，`IShellLinkW::GetArguments` 在 ctypes 直连虚表时返回 `E_INVALIDARG`（写入侧正常、
-官方 COM 也能读到），所以程序**不依赖**读取参数来判断系统位置，改用自己维护的
-`links.json` 清单——见 `nest.shell_path_for()`。
+写入侧只走 `winlink.py` 一处（`_ShellLink` 里那几个下标是唯一定义，
+开机自启的快捷方式也复用它，不另抄一份）。
+
+**读取侧干脆不用 COM**：`IShellLinkW::GetArguments` 在 ctypes 直连虚表时返回 `E_INVALIDARG`
+（写入侧正常、官方 COM 也能读到），踩过一次就不想再踩。现在读目标路径统一走
+`engine.resolve_shortcut_target()`——直接按 `[MS-SHLLINK]` 规范解析 `.lnk` 的二进制结构，
+不依赖 COM，也不会因为虚表下标错位而静默读错。判断"这是不是系统位置"则用程序自己维护的
+`links.json` 清单，见 `nest.shell_path_for()`。
 
 ---
 

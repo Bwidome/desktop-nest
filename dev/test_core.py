@@ -3,10 +3,12 @@
 """
 底层组件自检
 ============
-覆盖三个不再依赖界面的模块：
+覆盖不再依赖界面的模块：
 
-* winlink —— 快捷方式创建 / 解析（COM 虚表下标是实测出来的，这里加回归）
-* safety  —— 系统项保护、占用检测、路径校验
+* winlink —— 快捷方式**创建**（COM 虚表下标是实测出来的，这里加回归）
+* engine  —— 快捷方式**解析**（[MS-SHLLINK] 二进制）与类型判定
+* nest    —— 系统位置快捷方式生成 + shell 位置清单
+* safety  —— 系统项保护、占用检测、路径包含判定
 * textutil —— 模糊搜索与高亮区间
 
 用法：python dev/test_core.py
@@ -24,6 +26,8 @@ sys.path.insert(0, str(HERE))
 
 import subprocess  # noqa: E402
 
+import engine  # noqa: E402
+import nest  # noqa: E402
 import safety  # noqa: E402
 import textutil  # noqa: E402
 import winlink  # noqa: E402
@@ -43,21 +47,25 @@ def main() -> int:
     desktop = base / "Desktop"
     desktop.mkdir()
 
-    print("── 1. 快捷方式：创建与解析（COM）──")
+    print("── 1. 快捷方式：创建与解析 ──")
+    # 写侧走 COM（虚表下标是实测出来的，见 dev/probe_vtable.py）
     ok, reason = winlink.create_shortcut(base / "记事本.lnk",
                                          r"C:\Windows\System32\notepad.exe")
     check("创建指向程序的快捷方式", ok, reason)
+    # 读侧走 engine 的二进制解析（[MS-SHLLINK]）——那才是程序实际用的那条路
     check("解析回目标路径",
-          winlink.resolve_shortcut_target(base / "记事本.lnk")
+          engine.resolve_shortcut_target(base / "记事本.lnk")
           == Path(r"C:\Windows\System32\notepad.exe"),
-          str(winlink.resolve_shortcut_target(base / "记事本.lnk")))
+          str(engine.resolve_shortcut_target(base / "记事本.lnk")))
 
     # 虚表下标回归：写参数不能污染其它属性（历史上 SetDescription 错位写进了参数）
     link_arg = base / "带参数.lnk"
     winlink.create_shortcut(link_arg, r"C:\Windows\System32\notepad.exe",
                             arguments="//test")
-    details = winlink.shortcut_details(link_arg)
-    check("写参数后目标依然正确", details["target"].endswith("notepad.exe"), str(details))
+    check("写参数后目标依然正确",
+          engine.resolve_shortcut_target(link_arg)
+          == Path(r"C:\Windows\System32\notepad.exe"),
+          str(engine.resolve_shortcut_target(link_arg)))
     # 参数写入是否正确，用 Windows 官方 COM（WScript.Shell）来判定，不靠自己读
     official = subprocess.run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
@@ -66,19 +74,19 @@ def main() -> int:
     check("官方 COM 确认参数已正确写入",
           any("args=//test" in line for line in official.splitlines()), official.strip()[:200])
 
-    created, errors = winlink.ensure_system_shortcuts(base / "links")
-    check("批量创建系统位置快捷方式", created == len(winlink.SYSTEM_LOCATIONS) and not errors,
-          f"created={created} errors={errors}")
-    for name, _target, _desc in winlink.SYSTEM_LOCATIONS:
-        link = base / "links" / f"{name}.lnk"
-        check(f"「{name}」链接存在", link.exists())
-    # 系统位置的判定：模板里认得、且读不出普通路径
-    check("「此电脑」被识别为系统位置",
-          winlink.is_system_location(base / "links" / "此电脑.lnk"))
-    check("「回收站」被识别为系统位置",
-          winlink.is_system_location(base / "links" / "回收站.lnk"))
+    # 系统位置快捷方式：由 nest 生成，并把「名称 → shell 位置」记进自己的清单
+    nest.nest_root = lambda: base / ".nest"          # 指到沙盒，别碰真实用户目录
+    links = nest.sync_system_links()
+    check("批量创建系统位置快捷方式",
+          len(links) == len(nest.default_system_links()), f"created={len(links)}")
+    for name in ("此电脑", "回收站", "网络", "用户文件夹"):
+        check(f"「{name}」链接存在", (nest.links_store() / f"{name}.lnk").exists())
+    check("「此电脑」能查到 shell 位置",
+          nest.shell_path_for(nest.links_store() / "此电脑.lnk")
+          == f"::{winlink.CLSID_THIS_PC}",
+          nest.shell_path_for(nest.links_store() / "此电脑.lnk"))
     check("指向程序的链接不会被当成系统位置",
-          not winlink.is_system_location(base / "记事本.lnk"))
+          nest.shell_path_for(base / "记事本.lnk") == "")
 
     print()
     print("── 2. 安全校验 ──")
@@ -108,13 +116,8 @@ def main() -> int:
     check("子路径判定正确", safety.is_subpath(base / "a" / "b", base))
     check("同前缀不误判", not safety.is_subpath(base / "ab", base / "a"))
     check("自身算子路径", safety.is_subpath(base, base))
-
-    ok, _reason = safety.validate_repository(desktop, desktop)
-    check("拒绝把收纳目标设成桌面本身", not ok)
-    ok, _reason = safety.validate_repository(desktop / "sub", desktop)
-    check("拒绝把收纳目标放进桌面里面", not ok)
-    ok, _reason = safety.validate_repository(base / "repo", desktop)
-    check("桌面之外的目录可以通过", ok)
+    check("桌面之外的目录不算子路径",
+          not safety.is_subpath(base / "repo", desktop))
 
     print()
     print("── 3. 模糊搜索 ──")

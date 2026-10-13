@@ -280,9 +280,15 @@ def main() -> int:
     check("越界夹到末页", dock.strip_page_label.text() == "6/6")
 
     fired = []
+    toggled = []
     dock.open_desktop_files.connect(lambda: fired.append("panel"))
+    dock.toggle_desktop_files.connect(lambda: toggled.append("toggle"))
     dock.desktop_btn.activated.emit(dock.desktop_btn)
-    check("点第一个控件 → 打开收纳面板", fired == ["panel"], str(fired))
+    # 第一个控件是「上拉菜单」的开关：再点一次要能收起，
+    # 所以走 toggle_desktop_files，而不是只能打开的 open_desktop_files。
+    check("点第一个控件 → 开关收纳面板（而非只能打开）",
+          toggled == ["toggle"] and fired == [],
+          f"toggle={toggled} open={fired}")
 
     check("Dock 贴底显示",
           dock.y() + dock.height() >= dock.screen().availableGeometry().bottom() - 6,

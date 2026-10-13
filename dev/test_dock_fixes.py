@@ -265,6 +265,51 @@ def main() -> int:
           bool(dock_flags & _Qt.WindowType.WindowStaysOnTopHint))
 
     print()
+    print("── 8. 收纳面板是「上拉菜单窗口」而不是应用窗口 ──")
+    # 需求：面板要能随时开关、背景透明、贴底弹出——不是弹一个应用窗口
+    check("无边框（上拉菜单不该有标题栏）",
+          bool(panel_flags & _Qt.WindowType.FramelessWindowHint))
+    # 注意：Qt 里 Tool(0x0b) 的低位本身就含 Window(0x01) 那一位，
+    # 所以不能拿 `flags & Window` 判断"是不是普通窗口"——
+    # 必须把窗口类型字段整体取出来比较。
+    check("窗口类型是 Tool（不占任务栏，不是独立应用窗口）",
+          (panel_flags & _Qt.WindowType.WindowType_Mask) == _Qt.WindowType.Tool,
+          hex(int(panel_flags & _Qt.WindowType.WindowType_Mask)))
+    check("无系统投影（配合半透明背景才干净）",
+          bool(panel_flags & _Qt.WindowType.NoDropShadowWindowHint))
+    check("背景半透明（能透出后面的桌面）",
+          browser.testAttribute(_Qt.WidgetAttribute.WA_TranslucentBackground))
+
+    # 开合语义：同一个入口再点一次要能收起
+    browser.hide()
+    app.processEvents()
+    browser.toggle_window()
+    app.processEvents()
+    opened = browser.isVisible()
+    browser.toggle_window()
+    app.processEvents()
+    check("toggle_window：第一次打开、第二次收起",
+          opened and not browser.isVisible(),
+          f"open={opened} after={browser.isVisible()}")
+
+    # 位置：贴底居中，且给底部菜单栏留出空间
+    browser.show_window()
+    app.processEvents()
+    screen = browser.screen().availableGeometry()
+    delta = abs(browser.geometry().center().x() - screen.center().x())
+    check("水平居中弹出", delta <= 4, f"偏差 {delta}px")
+    check("底边让开底部菜单栏（不压住 Dock）",
+          browser.y() + browser.height() <= screen.bottom() - 60,
+          f"底边 {browser.y() + browser.height()} vs 屏幕底 {screen.bottom()}")
+    check("整块面板不跑出屏幕",
+          browser.x() >= screen.left()
+          and browser.x() + browser.width() <= screen.right() + 1
+          and browser.y() >= screen.top(),
+          f"x={browser.x()} y={browser.y()} w={browser.width()} h={browser.height()}")
+    browser.hide()
+    app.processEvents()
+
+    print()
     print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")
     for item in FAIL:
         print("  ·", item)

@@ -80,6 +80,7 @@ class MainPanel(QWidget):
         self.cfg = cfg
         self.dark = bool(cfg.get("dark"))
         self._items: "list" = []
+        self._history: "list[dict]" = []
         self._row_by_key: "dict[str, QTreeWidgetItem]" = {}
 
         self.setWindowTitle("桌面收纳 · 主面板")
@@ -219,14 +220,28 @@ class MainPanel(QWidget):
 
         self.history_tree = QTreeWidget()
         self.history_tree.setColumnCount(4)
-        self.history_tree.setHeaderLabels(["时间", "动作", "条目数", "位置"])
+        self.history_tree.setHeaderLabels(["时间", "动作", "条目数", "说明"])
         self.history_tree.setRootIsDecorated(False)
         self.history_tree.setUniformRowHeights(True)
         self.history_tree.setSelectionMode(
             QTreeWidget.SelectionMode.SingleSelection)
+        self.history_tree.itemSelectionChanged.connect(self._update_history_buttons)
         for index, width in enumerate((150, 80, 70)):
             self.history_tree.setColumnWidth(index, width)
         layout.addWidget(self.history_tree, 1)
+
+        history_actions = QHBoxLayout()
+        history_actions.setSpacing(8)
+        self.btn_undo = QPushButton("撤销选中操作")
+        self.btn_undo.clicked.connect(self._undo_selected)
+        self.btn_undo.setEnabled(False)
+        history_actions.addWidget(self.btn_undo)
+        self.btn_clear_history = QPushButton("清空历史")
+        self.btn_clear_history.setObjectName("Ghost")
+        self.btn_clear_history.clicked.connect(self._clear_history)
+        history_actions.addWidget(self.btn_clear_history)
+        history_actions.addStretch(1)
+        layout.addLayout(history_actions)
         return widget
 
     def apply_theme(self, dark: bool) -> None:
@@ -243,10 +258,14 @@ class MainPanel(QWidget):
     # ------------------------------------------------------------------
     # 数据刷新
     # ------------------------------------------------------------------
-    def update_overview(self, *, nest_items: int, desktop_pending: int,
+    def update_overview(self, *, items, nest_items: int, desktop_pending: int,
                         folders: int, shortcuts: int, history: "list[dict]") -> None:
-        """由主程序在扫描完成后调用。"""
-        self._items = nest.list_nest_items()
+        """由主程序在扫描完成后调用。
+
+        items 直接复用后台扫描线程已经算好的结果——在主线程再扫一遍目录
+        既慢又会卡住界面（这正是之前大桌面下开面板会顿一下的原因）。
+        """
+        self._items = items
         self.refresh_items()
         self.refresh_history(history)
         self.refresh_cards(nest_items, desktop_pending, folders, shortcuts)
@@ -313,19 +332,78 @@ class MainPanel(QWidget):
             node.setIcon(0, icon)
 
     def refresh_history(self, records: "list[dict]") -> None:
+        self._history = list(records)
         self.history_tree.clear()
+        action_labels = {"take": "收纳", "restore": "还原"}
         for record in records:
-            action = {"migrate": "收纳", "restore": "还原"}.get(
-                record.get("action"), record.get("action", ""))
+            action = action_labels.get(record.get("action"), record.get("action", ""))
+            count = int(record.get("count", 0) or 0)
             node = QTreeWidgetItem([
                 engine.time_text(record.get("time", 0)), action,
-                str(record.get("count", 0)), record.get("repository", ""),
+                str(count), f"{count} 项，可整体撤销",
             ])
+            # 把时间戳挂在行上，撤销时据此找回原始流水（含完整 moves 列表）
+            node.setData(0, int(Qt.ItemDataRole.UserRole), float(record.get("time", 0)))
             self.history_tree.addTopLevelItem(node)
         if records:
-            self.history_hint.setText(f"最近 {len(records)} 条操作记录。")
+            self.history_hint.setText(
+                f"最近 {len(records)} 次操作。选中一条点「撤销选中操作」，"
+                "就能把它们整体搬回原来的位置。")
         else:
-            self.history_hint.setText("还没有操作记录。")
+            self.history_hint.setText(
+                "还没有操作记录。收纳或还原桌面后，这里会出现可撤销的记录。")
+        self._update_history_buttons()
+
+    def _update_history_buttons(self) -> None:
+        if hasattr(self, "btn_undo"):
+            self.btn_undo.setEnabled(bool(self.history_tree.selectedItems()))
+
+    def _selected_record(self) -> "dict | None":
+        nodes = self.history_tree.selectedItems()
+        if not nodes:
+            return None
+        stamp = nodes[0].data(0, int(Qt.ItemDataRole.UserRole))
+        for record in self._history:
+            if abs(float(record.get("time", -1)) - float(stamp)) < 0.0005:
+                return record
+        return None
+
+    def _undo_selected(self) -> None:
+        record = self._selected_record()
+        if record is None:
+            return
+        count = int(record.get("count", 0) or 0)
+        if QMessageBox.question(
+                self, "撤销操作",
+                f"把这次操作的 {count} 个条目搬回原来的位置？\n\n"
+                "文件只是移动，不会被删除；目标已存在同名文件时自动加序号。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes) != QMessageBox.StandardButton.Yes:
+            return
+        result = nest.undo_record(record)
+        if result.moved and not result.failed:
+            # 全部搬回才删流水，避免"撤了一半"之后记录丢失
+            nest.drop_journal_record(record.get("time", 0))
+        self.request_refresh.emit()
+        message = f"已撤销 {result.moved} 项"
+        if result.failed:
+            message += "\n\n未能撤销：\n" + "\n".join(
+                f"· {n}：{r}" for n, r in result.failed[:6])
+            QMessageBox.warning(self, "撤销操作", message)
+        else:
+            QMessageBox.information(self, "撤销操作", message)
+
+    def _clear_history(self) -> None:
+        if not self._history:
+            return
+        if QMessageBox.question(
+                self, "清空历史",
+                "清空全部操作记录？\n\n只清记录，不会动任何文件。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes) != QMessageBox.StandardButton.Yes:
+            return
+        nest.clear_journal()
+        self.request_refresh.emit()
 
     # ------------------------------------------------------------------
     # 条目操作

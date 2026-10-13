@@ -18,6 +18,7 @@ from qt_compat import (
 
 import engine
 import icons
+import theme
 
 # 每种类型没有真实图标时的占位色
 PLACEHOLDER_COLORS = {
@@ -27,6 +28,9 @@ PLACEHOLDER_COLORS = {
     "code": "#14B8A6", "font": "#A855F7", "folder": "#E3B341", "other": "#94A3B8",
     "desktop": "#4F6BED",
 }
+
+# 品牌主色统一从主题取，避免同一串色值散落在多个文件里各写一遍
+BRAND_ACCENT = theme.LIGHT["accent"]
 
 
 def letter_pixmap(text: str, color: str, size: int) -> QPixmap:
@@ -49,19 +53,6 @@ def letter_pixmap(text: str, color: str, size: int) -> QPixmap:
                      (text or "?")[:1].upper())
     painter.end()
     return pixmap
-
-
-def item_icon(item: "engine.RepoItem", size: int) -> QIcon:
-    """取一个条目的图标；取不到就返回带首字的占位图标。"""
-    hint = None
-    if item.kind == "shortcut":
-        hint = engine.resolve_shortcut_target(item.path)
-    raw = icons.get_icon(item.path, size, exe_hint=hint)
-    icon = raw_to_qicon(raw)
-    if icon is not None:
-        return icon
-    color = PLACEHOLDER_COLORS.get(item.kind, PLACEHOLDER_COLORS["other"])
-    return QIcon(letter_pixmap(item.name, color, size))
 
 
 def raw_to_qicon(raw) -> "QIcon | None":
@@ -95,7 +86,7 @@ def app_icon_pixmap(size: int = 256) -> QPixmap:
     path = QPainterPath()
     radius = size * 0.22
     path.addRoundedRect(0.5, 0.5, size - 1, size - 1, radius, radius)
-    painter.fillPath(path, QColor("#4F6BED"))
+    painter.fillPath(path, QColor(BRAND_ACCENT))
     painter.setPen(Qt.PenStyle.NoPen)
     unit = size / 16.0
     painter.setBrush(QColor("#FFFFFF"))
@@ -116,7 +107,7 @@ def app_icon_pixmap(size: int = 256) -> QPixmap:
 
 
 def app_icon() -> QIcon:
-    """多尺寸的程序图标（小到 16px 都清晰）。"""
+    """多尺寸的程序图标（小到 16px 都清晰）。托盘图标也直接复用它。"""
     icon = QIcon()
     for size in (16, 24, 32, 48, 64, 128, 256):
         icon.addPixmap(app_icon_pixmap(size))
@@ -165,22 +156,6 @@ def icon_hint_for(path: Path, kind: str = "") -> "Path | None":
         return engine.resolve_shortcut_target(Path(path))
     except Exception:
         return None
-
-
-def set_widget_icon(widget, icon) -> None:
-    """把 QIcon 贴到控件上，兼容两种控件：
-
-    * QToolButton 这类 —— 走 setIcon()
-    * ItemTile 这类自绘卡片 —— 图标在 `icon_label` 的 pixmap 上
-    """
-    if icon is None or icon.isNull():
-        return
-    if hasattr(widget, "setIcon"):
-        widget.setIcon(icon)
-        return
-    label = getattr(widget, "icon_label", None)
-    if label is not None:
-        label.setPixmap(icon.pixmap(label.width() or 48, label.height() or 48))
 
 
 class IconLoader(QWidget):
@@ -241,14 +216,22 @@ class IconLoader(QWidget):
     # ------------------------------------------------------------------
     # 清理
     # ------------------------------------------------------------------
-    def discard_pending(self) -> None:
+    def discard_pending(self, keep=None) -> None:
         """丢掉**还没处理**的排队请求，保留已取到的图标。
 
         翻页 / 切换筛选时用这个：正准备取的那批已经不需要了，
         但已经取到的图标必须留着，否则回到上一页就会一片空白。
+
+        keep：可选的断言，返回 True 的请求会被保留。面板翻页时用它保住
+        "常用启动"那一排的请求（它们的 key 以 ``app:`` 开头），
+        否则翻页会把还没取到图标的常用项请求一起丢掉，那排就永远是占位色块。
         """
-        self._queue.clear()
-        self._timer.stop()
+        if keep is None:
+            self._queue.clear()
+        else:
+            self._queue = [item for item in self._queue if keep(item[0])]
+        if not self._queue:
+            self._timer.stop()
 
     def clear(self) -> None:
         """连内存缓存一起清掉（只在明确要释放内存时用）。"""

@@ -1,0 +1,14 @@
+# 统一换行符，避免 Windows 上反复出现 "LF will be replaced by CRLF" 噪音。
+# 源码固定 LF：工作区就是 LF，git 不会再"预告"要改写成 CRLF，提交也干净。
+* text=auto eol=lf
+
+# 批处理 / PowerShell 必须是 CRLF，否则部分 Windows 环境执行异常
+# （LF-only 的 .bat 在 goto / 多行块里可能直接跑飞）。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制资源不做换行转换
+*.ico binary
+*.png binary
+*.jpg binary

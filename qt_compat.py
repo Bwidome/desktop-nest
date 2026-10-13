@@ -6,7 +6,7 @@ Qt 加载器
 优先用程序自带 `libs/` 里的 PyQt6（这样换台机器、换个 Python 也能跑），
 找不到就退回系统里安装的 PyQt6 / PySide6。
 
-另外提供两个小工具：原始像素 → 图标、圆角图形。
+另外提供两个小工具：原始像素 → 图标、按宽度省略文字。
 """
 
 from __future__ import annotations
@@ -27,22 +27,22 @@ if _LIBS.is_dir() and str(_LIBS) not in sys.path:
 BACKEND = ""
 _IMPORT_ERROR = ""
 
+# 只导入各模块真正用到的名字——这份清单由「所有 `from qt_compat import ...`
+# 的并集 + 本文件两个小工具的自身需要」推导而来，不再凭感觉堆一大串。
+# 少一个名字会让某个模块 import 直接失败，所以增删请同步检查调用方。
 try:
     from PyQt6.QtCore import (  # noqa: F401
-        QByteArray, QEvent, QLibraryInfo, QMimeData, QObject, QPoint, QRect, QSize,
-        Qt, QThread, QTimer, QUrl, pyqtSignal as Signal, pyqtSlot as Slot,
+        QLibraryInfo, QPoint, QRect, QSize,
+        Qt, QThread, QTimer, pyqtSignal as Signal,
     )
     from PyQt6.QtGui import (  # noqa: F401
-        QAction, QBrush, QColor, QCursor, QDesktopServices, QFont, QFontMetrics,
-        QGuiApplication, QIcon, QImage, QKeySequence, QLinearGradient, QPainter,
-        QPainterPath, QPen, QPixmap, QShortcut, QTextOption,
+        QAction, QColor, QFont, QFontMetrics, QIcon, QImage, QPainter,
+        QPainterPath, QPixmap,
     )
     from PyQt6.QtWidgets import (  # noqa: F401
-        QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
-        QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
-        QListWidgetItem, QMenu, QMessageBox, QProgressBar, QPushButton, QScrollArea,
-        QSizeGrip, QSizePolicy, QSpacerItem, QStackedWidget, QStyle,
-        QStyledItemDelegate, QStyleOptionViewItem, QSystemTrayIcon, QTabWidget,
+        QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
+        QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu,
+        QMessageBox, QPushButton, QScrollArea, QSystemTrayIcon, QTabWidget,
         QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
     )
 
@@ -50,22 +50,21 @@ try:
 except ImportError as exc:  # pragma: no cover
     _IMPORT_ERROR = str(exc)
     try:
+        # 与上面的 PyQt6 清单保持一一对应（此前 PySide6 分支漏了
+        # QGridLayout / QInputDialog，一旦回退就会 NameError）。
         from PySide6.QtCore import (  # type: ignore  # noqa: F401
-            QByteArray, QEvent, QLibraryInfo, QMimeData, QObject, QPoint, QRect, QSize,
-            Qt, QThread, QTimer, QUrl, Signal, Slot,
+            QLibraryInfo, QPoint, QRect, QSize,
+            Qt, QThread, QTimer, Signal,
         )
         from PySide6.QtGui import (  # type: ignore  # noqa: F401
-            QAction, QBrush, QColor, QCursor, QDesktopServices, QFont, QFontMetrics,
-            QGuiApplication, QIcon, QImage, QKeySequence, QLinearGradient, QPainter,
-            QPainterPath, QPen, QPixmap, QShortcut, QTextOption,
+            QAction, QColor, QFont, QFontMetrics, QIcon, QImage, QPainter,
+            QPainterPath, QPixmap,
         )
         from PySide6.QtWidgets import (  # type: ignore  # noqa: F401
-            QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
-            QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu,
-            QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizeGrip,
-            QSizePolicy, QSpacerItem, QStackedWidget, QStyle, QStyledItemDelegate,
-            QStyleOptionViewItem, QSystemTrayIcon, QTabWidget, QToolButton,
-            QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+            QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
+            QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu,
+            QMessageBox, QPushButton, QScrollArea, QSystemTrayIcon, QTabWidget,
+            QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
         )
 
         BACKEND = "PySide6"
@@ -117,41 +116,6 @@ def raw_to_icon(raw) -> "QIcon | None":
     if image.isNull():
         return None
     return QIcon(QPixmap.fromImage(image.copy()))
-
-
-def raw_to_pixmap(raw, size: int = 0) -> "QPixmap | None":
-    if raw is None or not getattr(raw, "is_valid", lambda: False)():
-        return None
-    image = QImage(raw.bgra, raw.width, raw.height,
-                   raw.width * 4, QImage.Format.Format_ARGB32)
-    if image.isNull():
-        return None
-    pixmap = QPixmap.fromImage(image.copy())
-    if size and size > 0 and pixmap.width() != size:
-        pixmap = pixmap.scaled(size, size,
-                               Qt.AspectRatioMode.KeepAspectRatio,
-                               Qt.TransformationMode.SmoothTransformation)
-    return pixmap
-
-
-def letter_icon(letter: str, color: str, size: int = 48) -> "QPixmap":
-    """生成一个带首字母的圆角占位图标（取不到真实图标时用）。"""
-    pixmap = QPixmap(size, size)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-    path = QPainterPath()
-    path.addRoundedRect(0, 0, size, size, size * 0.24, size * 0.24)
-    painter.fillPath(path, QColor(color))
-    painter.setPen(QColor("#FFFFFF"))
-    font = QFont()
-    font.setPixelSize(max(1, int(size * 0.46)))      # 负数或 0 会让 Qt 报错
-    font.setBold(True)
-    painter.setFont(font)
-    painter.drawText(QRect(0, 0, size, size), int(Qt.AlignmentFlag.AlignCenter), letter[:1].upper())
-    painter.end()
-    return pixmap
 
 
 def elide(text: str, font: "QFont", width: int) -> str:

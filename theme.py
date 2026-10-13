@@ -38,6 +38,10 @@ LIGHT = {
     "danger_soft": "#FDECEA",
     "highlight": "#FFE9A8",     # 搜索命中底色
     "shadow": "#B9C0CC",
+    # 上拉菜单（收纳面板）用半透明底色，让桌面微微透出来，观感更轻
+    "popup": "rgba(255, 255, 255, 0.90)",
+    "popup_alt": "rgba(247, 249, 252, 0.86)",
+    "popup_border": "rgba(15, 23, 42, 0.10)",
 }
 
 DARK = {
@@ -63,6 +67,10 @@ DARK = {
     "danger_soft": "#2D1E1D",
     "highlight": "#7A6520",
     "shadow": "#0B0D10",
+    # 上拉菜单（收纳面板）用半透明底色
+    "popup": "rgba(31, 34, 40, 0.92)",
+    "popup_alt": "rgba(38, 42, 50, 0.88)",
+    "popup_border": "rgba(255, 255, 255, 0.12)",
 }
 
 RADIUS = 10
@@ -97,22 +105,23 @@ QDialog, QMainWindow {{
     border: 1px solid {c['border']};
     border-radius: {RADIUS}px;
 }}
+/* ---------- 上拉菜单（收纳面板）---------- */
 #Popup {{
-    background: {c['surface']};
-    border: 1px solid {c['border']};
-    border-radius: {RADIUS + 2}px;
+    background: {c['popup']};
+    border: 1px solid {c['popup_border']};
+    border-radius: {RADIUS + 6}px;
 }}
 #Toolbar {{
-    background: {c['surface_alt']};
-    border-bottom: 1px solid {c['border']};
-    border-top-left-radius: {RADIUS + 1}px;
-    border-top-right-radius: {RADIUS + 1}px;
+    background: {c['popup_alt']};
+    border-bottom: 1px solid {c['popup_border']};
+    border-top-left-radius: {RADIUS + 5}px;
+    border-top-right-radius: {RADIUS + 5}px;
 }}
 #FooterBar {{
-    background: {c['surface_alt']};
-    border-top: 1px solid {c['border']};
-    border-bottom-left-radius: {RADIUS + 1}px;
-    border-bottom-right-radius: {RADIUS + 1}px;
+    background: {c['popup_alt']};
+    border-top: 1px solid {c['popup_border']};
+    border-bottom-left-radius: {RADIUS + 5}px;
+    border-bottom-right-radius: {RADIUS + 5}px;
 }}
 
 /* ---------- 文字层级 ---------- */

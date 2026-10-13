@@ -16,8 +16,8 @@ from ctypes import wintypes
 from pathlib import Path
 
 from qt_compat import (
-    QAction, QApplication, QColor, QFont, QIcon, QMenu, QMessageBox, QPainter,
-    QPainterPath, QPixmap, QSystemTrayIcon, Qt, QTimer, QWidget, Signal, QThread,
+    QAction, QApplication, QIcon, QMenu, QMessageBox, QSystemTrayIcon, Qt,
+    QThread, QTimer, QWidget, Signal,
 )
 
 import config
@@ -29,6 +29,7 @@ from desktop_browser import DesktopBrowser
 from dock import DockBar
 from panel import MainPanel
 from settings import SettingsDialog
+from widgets import app_icon
 
 
 class MONITORINFO(ctypes.Structure):
@@ -60,7 +61,7 @@ class ScanWorker(QThread):
         error = ""
         try:
             items = nest.list_nest_items()
-            history = engine.read_journal(40)
+            history = nest.read_journal(40)
             counts = {
                 "desktop": nest.desktop_item_count(self.desktop),
                 "nest": len(items),
@@ -73,44 +74,6 @@ class ScanWorker(QThread):
                                               "folders": 0, "shortcuts": 0}
             error = f"{type(exc).__name__}: {exc}"
         self.done.emit(items, history, counts, error)
-
-
-# --------------------------------------------------------------------------
-# 生成托盘图标（不依赖外部图片文件）
-# --------------------------------------------------------------------------
-def make_tray_icon(accent: str = "#4F6BED") -> QIcon:
-    """画一个"抽屉"图标当作托盘图标，各尺寸都清晰。"""
-    icon = QIcon()
-    for size in (16, 24, 32, 48, 64):
-        pixmap = QPixmap(size, size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        radius = size * 0.24
-        path = QPainterPath()
-        path.addRoundedRect(0.5, 0.5, size - 1, size - 1, radius, radius)
-        painter.fillPath(path, QColor(accent))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#FFFFFF"))
-        unit = size / 16.0
-        # 两层抽屉 + 下方箭头
-        painter.drawRoundedRect(int(3.5 * unit), int(4 * unit),
-                                int(9 * unit), int(2.6 * unit),
-                                unit, unit)
-        painter.setBrush(QColor("#D8E0FF"))
-        painter.drawRoundedRect(int(3.5 * unit), int(7.6 * unit),
-                                int(9 * unit), int(2.6 * unit),
-                                unit, unit)
-        painter.setBrush(QColor("#FFFFFF"))
-        arrow = QPainterPath()
-        arrow.moveTo(size / 2, int(13.4 * unit))
-        arrow.lineTo(int(5 * unit), int(10.6 * unit))
-        arrow.lineTo(int(11 * unit), int(10.6 * unit))
-        arrow.closeSubpath()
-        painter.fillPath(arrow, QColor("#FFFFFF"))
-        painter.end()
-        icon.addPixmap(pixmap)
-    return icon
 
 
 # --------------------------------------------------------------------------
@@ -153,6 +116,7 @@ class TrayApp(QWidget):
         # ---- 底部菜单栏 ----
         self.dock = DockBar(cfg)
         self.dock.open_desktop_files.connect(self.show_desktop_files)
+        self.dock.toggle_desktop_files.connect(self.desktop_browser.toggle_window)
         self.dock.open_panel.connect(self.open_panel)
         self.dock.open_settings.connect(self.open_settings)
         self.dock.quit_app.connect(self.quit_app)
@@ -161,7 +125,8 @@ class TrayApp(QWidget):
         self.dock.hide_requested.connect(self._on_dock_hidden)
 
         # ---- 托盘 ----
-        self.tray = QSystemTrayIcon(make_tray_icon(), self)
+        # 托盘图标直接复用程序图标（同一套"抽屉"造型，见 widgets.app_icon）
+        self.tray = QSystemTrayIcon(app_icon(), self)
         self.tray.setToolTip(f"{config.APP_NAME_FULL} · 正在运行")
         self.tray.activated.connect(self._on_tray_activated)
         self.menu = QMenu()
@@ -352,6 +317,7 @@ class TrayApp(QWidget):
         self.dock.set_items(items)
         self.dock.set_desktop_count(len(items))
         self.panel.update_overview(
+            items=items,
             nest_items=len(items),
             desktop_pending=counts.get("desktop", 0),
             folders=counts.get("folders", 0),
@@ -385,7 +351,7 @@ class TrayApp(QWidget):
     # 桌面收纳：启动收纳 / 退出还原
     # ------------------------------------------------------------------
     def show_desktop_files(self) -> None:
-        """打开收纳面板（Dock 左边第一个控件）。"""
+        """打开收纳面板（上拉菜单）。再点一次会收起，见 toggle_desktop_files。"""
         self.desktop_browser.show_window()
 
     def recover_leftovers(self) -> None:
@@ -633,16 +599,6 @@ class TrayApp(QWidget):
         finally:
             QTimer.singleShot(1200, self._auto_show_tick)
 
-    def _migrate_items(self, items: "list") -> None:
-        """把指定条目收纳起来（面板里"还原到桌面"的反向操作）。"""
-        if not items:
-            return
-        result = nest.take_from_desktop(self.cfg.desktop, items=items)
-        self.refresh()
-        if result.failed:
-            QMessageBox.warning(self, "收纳", result.summary() + "\n\n"
-                                + "\n".join(f"· {n}：{r}" for n, r in result.failed[:6]))
-
     # ------------------------------------------------------------------
     # 窗口
     # ------------------------------------------------------------------
@@ -680,11 +636,8 @@ class TrayApp(QWidget):
 
     def _on_tray_activated(self, reason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            # 左键单击：开关收纳面板
-            if self.desktop_browser.isVisible():
-                self.desktop_browser.hide()
-            else:
-                self.show_desktop_files()
+            # 左键单击：开关收纳面板（上拉菜单，再点一次收起）
+            self.desktop_browser.toggle_window()
         elif reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self.open_panel()
 
@@ -703,7 +656,9 @@ class TrayApp(QWidget):
     def restore_desktop(self) -> None:
         """把收纳目录里的全部内容（含文件夹）还原回桌面。"""
         items = nest.list_nest_items()
-        content = [i for i in items if not nest.shell_path_for(i.path)]
+        # shell 位置映射只读一次（逐条调 shell_path_for 会让每个条目读一遍 links.json）
+        shell_names = nest.shell_path_map()
+        content = [i for i in items if not shell_names.get(i.path.stem)]
         if not content:
             QMessageBox.information(self, "还原桌面", "收纳目录里没有可还原的内容。")
             return

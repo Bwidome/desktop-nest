@@ -42,7 +42,7 @@ STRIP_ICON = 30
 MIN_MARGIN = 8
 
 
-def make_desktop_glyph(size: int, accent: str = "#4F6BED") -> QPixmap:
+def make_desktop_glyph(size: int, accent: str = theme_mod.LIGHT["accent"]) -> QPixmap:
     """画一个"桌面 + 网格"的小图标，代表"桌面整理"入口。"""
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
@@ -177,8 +177,8 @@ class DockIcon(QToolButton):
 class DockBar(QWidget):
     """贴底的悬浮菜单栏。"""
 
-    open_desktop_files = Signal()      # 打开完整收纳面板
-    open_repository = Signal()         # 兼容旧接口：打开收纳目录
+    open_desktop_files = Signal()      # 打开收纳面板（菜单项：一定"打开"）
+    toggle_desktop_files = Signal()    # 开关收纳面板（第一个控件：再点一次收起）
     open_panel = Signal()
     open_settings = Signal()
     quit_app = Signal()
@@ -321,10 +321,10 @@ class DockBar(QWidget):
         # ---- 第一个控件：桌面整理 ----
         self.desktop_btn = self._make_button(
             icon_size=self._icon_size + 4,
-            tooltip="桌面整理：打开分页面板，搜索 / 打开 / 还原桌面上的内容",
+            tooltip="桌面整理：点开分页面板（搜索 / 打开 / 还原到桌面）；再点一次收起",
             fallback_text="桌",
             fallback_kind="desktop",
-            on_click=lambda _btn: self.open_desktop_files.emit(),
+            on_click=lambda _btn: self.toggle_desktop_files.emit(),
             force_icon=make_desktop_glyph(self._icon_size + 4),
         )
         self.apps_flow.add_item(self.desktop_btn)
