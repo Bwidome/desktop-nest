@@ -23,9 +23,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from qt_compat import (
-    QColor, QFrame, QGridLayout, QHBoxLayout, QIcon, QLabel, QMenu, QPainter,
-    QPainterPath, QPixmap, QPoint, QSize, QToolButton, QVBoxLayout, QWidget, Qt,
-    QTimer, Signal,
+    QColor, QFontMetrics, QFrame, QGridLayout, QHBoxLayout, QIcon, QLabel, QMenu,
+    QPainter, QPainterPath, QPixmap, QPoint, QSize, QToolButton, QVBoxLayout,
+    QWidget, Qt, QTimer, Signal,
 )
 
 import engine
@@ -147,19 +147,41 @@ class DockIcon(QToolButton):
     def __init__(self, icon_size: int, *, show_text: bool = False, parent=None):
         super().__init__(parent)
         self.icon_size = icon_size
+        self._show_text = show_text
         self.setObjectName("DockIcon")
         self.setAutoRaise(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setIconSize(QSize(icon_size, icon_size))
-        if show_text:
-            self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-            self.setFixedSize(max(icon_size + 20, 68), icon_size + 26)
-        else:
-            self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-            self.setFixedSize(icon_size + 14, icon_size + 14)
+        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon if show_text
+                                else Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self._refit()
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(
             lambda pos: self.context_requested.emit(self, self.mapToGlobal(pos)))
+
+    def _refit(self) -> None:
+        """按图标 + **当前文字的实际宽度**定尺寸。
+
+        以前这里写死 `max(icon_size + 20, 68)`。问题在于字号用的是 pt（会跟着
+        系统 DPI 缩放），而写死的宽度不会：在 125% / 150% 缩放下，
+        「任务管理器」这种名字根本装不下，相邻两项的文字会叠在一起。
+        所以改成用 QFontMetrics 实测文字宽度。
+        """
+        if not self._show_text:
+            self.setFixedSize(self.icon_size + 14, self.icon_size + 14)
+            return
+        text_width = QFontMetrics(self.font()).horizontalAdvance(self.text() or "")
+        self.setFixedSize(max(self.icon_size + 20, text_width + 14), self.icon_size + 26)
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        super().setText(text)
+        self._refit()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        # 样式表里的字体是 polish 之后才生效的，所以显示时再量一次。
+        # _refit 是幂等的：字体稳定后重复调用不会改变尺寸。
+        super().showEvent(event)
+        self._refit()
 
     @staticmethod
     def elide(text: str, limit: int = 6) -> str:

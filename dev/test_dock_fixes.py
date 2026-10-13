@@ -243,15 +243,31 @@ def main() -> int:
         info = tray_app.MONITORINFO()
         info.cbSize = ctypes.sizeof(tray_app.MONITORINFO)
         user32.GetMonitorInfoW(user32.MonitorFromWindow(hwnd, 2), ctypes.byref(info))
+        mon_w = info.rcMonitor.right - info.rcMonitor.left
+        mon_h = info.rcMonitor.bottom - info.rcMonitor.top
         work_w = info.rcWork.right - info.rcWork.left
         work_h = info.rcWork.bottom - info.rcWork.top
+
+        # 这里必须**按实现里的三条规则复算期望值**，不能凭一个面积阈值猜。
+        # 原来写的是 `coverage < 0.4`，跟实现的 `>= 0.80 且高度 >= 90% 工作区`
+        # 不一致：前台窗口占比落在 40%~80% 时，测试必然误报失败。
         coverage = (win_w * win_h) / float(work_w * work_h) if work_w and work_h else 0
-        if coverage < 0.4:
-            check(f"前台窗口只占 {coverage:.0%}，不该判为让开", not result,
-                  f"窗口 {win_w}x{win_h} 工作区 {work_w}x{work_h}")
-        else:
-            check(f"前台窗口占 {coverage:.0%}，判为让开是合理的", result,
-                  f"窗口 {win_w}x{win_h} 工作区 {work_w}x{work_h}")
+        expected = False
+        if win_w >= mon_w * 0.96 and win_h >= mon_h * 0.96:
+            expected = True                       # 规则 1：真全屏，铺满整块显示器
+        elif coverage >= 0.80 and win_h >= work_h * 0.90:
+            expected = True                       # 规则 2：最大化（按面积占比）
+        elif tray.dock.isVisible():               # 规则 3：盖住菜单栏所在那一带
+            dock_rect = tray.dock.geometry()
+            if (rect.left <= dock_rect.left() and rect.right >= dock_rect.right()
+                    and rect.bottom >= dock_rect.top()):
+                expected = True
+        if tray._desktop_is_foreground():         # 桌面本身在前台不算
+            expected = False
+
+        check(f"让开判据与实际窗口几何一致（占 {coverage:.0%}，"
+              f"{win_w}x{win_h} / 工作区 {work_w}x{work_h}）",
+              result == expected, f"判据={result} 期望={expected}")
 
     print()
     print("── 7. 面板不置顶，不遮挡其他程序 ──")
@@ -308,6 +324,21 @@ def main() -> int:
           f"x={browser.x()} y={browser.y()} w={browser.width()} h={browser.height()}")
     browser.hide()
     app.processEvents()
+
+    print()
+    print("── 9. Dock 图标按钮要装得下自己的文字（高 DPI 下别叠字）──")
+    # 原来 DockIcon 写死 max(icon_size+20, 68)：字号用 pt 会跟着 DPI 放大，
+    # 写死的宽度不会，于是 125% 缩放下「任务管理器」装不下、相邻两项文字叠在一起。
+    from qt_compat import QFontMetrics
+    from dock import DockIcon
+
+    for label in ("任务管理器", "命令提示符", "字符映射表", "记事本"):
+        icon = DockIcon(32, show_text=True)
+        icon.setText(label)
+        need = QFontMetrics(icon.font()).horizontalAdvance(label) + 14
+        expected = max(32 + 20, need)
+        check(f"「{label}」宽度按文字自适应（{icon.width()}px）",
+              icon.width() == expected, f"w={icon.width()} 期望={expected}")
 
     print()
     print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")
