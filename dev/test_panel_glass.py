@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-主面板「悬浮磨砂玻璃卡片」—— 回归测试
-====================================
+悬浮磨砂玻璃卡片 —— 回归测试
+============================
+覆盖**主面板**和**收纳面板（Dock 第一个控件点开的上拉浮层）**——
+两者共用 `widgets.GlassCardMixin` 的同一套外观。
+
 盯住四类**只有真机上才看得见、单元测试很容易漏掉**的问题：
 
 1. **高 DPI 裁剪**：`SetWindowRgn` 收物理像素，Qt 报的是逻辑像素。
@@ -50,7 +53,7 @@ def main() -> int:
     import config as config_mod
     import engine
     import theme as theme_mod
-    from qt_compat import QApplication, QFrame, Qt, QToolButton
+    from qt_compat import QApplication, QFrame, QPalette, Qt, QToolButton
 
     # ------------------------------------------------------------------
     print("1. 窗口区域换算（高 DPI 裁剪的根因）")
@@ -90,10 +93,13 @@ def main() -> int:
     # ------------------------------------------------------------------
     glass = theme_mod.stylesheet(False, glass=True)
     normal = theme_mod.stylesheet(False, glass=False)
-    check("#MainPanel 自己不画底（画了就把磨砂盖住）",
-          "#MainPanel { background: transparent; }" in glass)
-    check("深色半透明画在子控件 #MainCard 上",
-          "#MainCard {" in glass and theme_mod.GLASS["card"] in glass)
+    check("顶层窗口自己不画底（画了就把磨砂盖住）",
+          "#MainPanel, #BrowserRoot { background: transparent; }" in glass)
+    check("深色半透明画在子控件卡片上（#MainCard / #Popup）",
+          "#MainCard, #Popup {" in glass and theme_mod.GLASS["card"] in glass)
+    check("收纳面板（#Popup）和主面板共用同一套玻璃卡片",
+          "#Popup" in glass
+          and f"border-radius: {theme_mod.GLASS_RADIUS}px;" in glass)
     check("卡片用大圆角", f"border-radius: {theme_mod.GLASS_RADIUS}px;" in glass,
           str(theme_mod.GLASS_RADIUS))
     check("圆角半径是大圆角（>= 18px）", theme_mod.GLASS_RADIUS >= 18)
@@ -104,6 +110,10 @@ def main() -> int:
           "QMenu, QMessageBox {" in glass and "QToolTip {" in glass)
     check("玻璃样式不污染普通主题", "#MainCard" not in normal
           and "#GlassClose" not in normal)
+    check("玻璃规则块放在整份样式表**最后**"
+          "（放中间会被后面的 #Popup / QMenu 等普通规则盖掉）",
+          glass.rstrip().endswith("}")
+          and glass.index("#MainCard, #Popup") > glass.index("#Popup {"))
     check("玻璃配色不跟随明暗主题（需求就是恒定深色）",
           theme_mod.GLASS["text"] == "#F3F5F9")
 
@@ -230,6 +240,36 @@ def main() -> int:
           bool(calls) and all(c[2] == theme_mod.GLASS_RADIUS for c in calls))
 
     panel.close()
+    app.processEvents()
+
+    # ------------------------------------------------------------------
+    print("7. 收纳面板（Dock 第一个控件点开的上拉浮层）共用同一套玻璃外观")
+    # ------------------------------------------------------------------
+    from desktop_browser import DesktopBrowser
+    from widgets import GlassCardMixin
+
+    browser = DesktopBrowser(cfg)
+    check("主面板用了共享的 GlassCardMixin", isinstance(panel, GlassCardMixin))
+    check("收纳面板也用了共享的 GlassCardMixin",
+          isinstance(browser, GlassCardMixin))
+    check("收纳面板顶层 objectName 是 BrowserRoot（QSS 靠它选中）",
+          browser.objectName() == "BrowserRoot")
+    check("收纳面板的卡片子控件是 #Popup",
+          browser.findChild(QFrame, "Popup") is not None)
+    check("收纳面板固定深色玻璃（不跟应用明暗主题走）", browser.dark is True)
+    check("收纳面板调色板也是深色（兜住 QSS 没写到的控件）",
+          browser.palette().color(QPalette.ColorRole.Window).lightness() < 128,
+          browser.palette().color(QPalette.ColorRole.Window).name())
+    check("收纳面板的样式表里带着玻璃卡片规则",
+          "#MainCard, #Popup {" in browser.styleSheet())
+    check("两个窗口的磨砂状态位都由 mixin 提供",
+          hasattr(panel, "_glass_mode") and hasattr(browser, "_glass_mode")
+          and hasattr(panel, "_glass_ready") and hasattr(browser, "_glass_ready"))
+    check("各自的重裁圆角走同一条路（resizeEvent 在 mixin 里）",
+          GlassCardMixin.resizeEvent is not None
+          and type(panel).resizeEvent is GlassCardMixin.resizeEvent
+          and type(browser).resizeEvent is GlassCardMixin.resizeEvent)
+    browser.close()
     app.processEvents()
 
     print()

@@ -27,7 +27,8 @@
 真正的"把背后桌面模糊掉"由 DWM 提供（见 `acrylic.py`），
 窗口再按圆角裁一刀，免得模糊糊到圆角外面。
 
-两个容易踩的点：
+这些事都收在 `widgets.GlassCardMixin` 里（收纳面板共用同一套），本文件只负责
+把卡片搭出来。两个容易踩的点也由 mixin 统一处理：
 
 1. **不能给顶层窗口设 QSS 背景**——那会把磨砂整块盖住，看起来就是一块
    不透明的板子。卡片外观一律交给子控件。
@@ -43,22 +44,14 @@ import time
 from pathlib import Path
 
 from qt_compat import (
-    QColor, QFrame, QHBoxLayout, QLabel, QMessageBox, QPalette, QPushButton,
-    QTabWidget, QToolButton, QTreeWidget, QTreeWidgetItem, Qt, QVBoxLayout,
-    QWidget, Signal,
+    QCheckBox, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton, QTabWidget,
+    QToolButton, QTreeWidget, QTreeWidgetItem, Qt, QVBoxLayout, QWidget, Signal,
 )
 
-import acrylic
 import config
 import engine
 import nest
-import theme as theme_mod
-from widgets import IconLoader, app_icon
-
-# 磨砂玻璃的着色。要和 theme.GLASS['card'] 对齐着看：
-# DWM 的着色和卡片自己的底色是**两层**，都调浓就会叠成一块黑板。
-GLASS_TINT = "#181A20"
-GLASS_TINT_ALPHA = 0.26
+from widgets import GlassCardMixin, IconLoader, app_icon
 
 
 class StatCard(QFrame):
@@ -86,7 +79,7 @@ class StatCard(QFrame):
         self.hint.setText(hint)
 
 
-class MainPanel(QWidget):
+class MainPanel(GlassCardMixin, QWidget):
     """主面板窗口。"""
 
     request_refresh = Signal()
@@ -96,6 +89,11 @@ class MainPanel(QWidget):
     request_settings = Signal()
     request_quit = Signal()
     quick_changed = Signal()
+    extensions_changed = Signal()      # 「显示文件后缀名」开关变了，通知别处刷新
+
+    # 悬浮玻璃卡片：磨砂 + 圆角裁剪 + 深色调色板都在 GlassCardMixin 里
+    _glass_card_sel = "#MainCard"
+    _glass_log_name = "主面板"
 
     def __init__(self, cfg: config.Config, parent=None):
         super().__init__(parent)
@@ -105,8 +103,7 @@ class MainPanel(QWidget):
         self._history: "list[dict]" = []
         self._row_by_key: "dict[str, QTreeWidgetItem]" = {}
         self._drag_offset = None
-        self._glass_mode = ""
-        self._glass_ready = False
+        self._glass_init()
 
         # 悬浮卡片：无边框 + 窗口自身透明，深色半透明只画在里面的 #MainCard 上。
         # 注意**不能**给顶层窗口设 QSS 背景——那会把 DWM 的磨砂整块盖住，
@@ -198,6 +195,24 @@ class MainPanel(QWidget):
             lambda: engine.open_in_explorer(nest.desktop_store()))
         path_row.addWidget(self.btn_open_nest)
         root.addLayout(path_row)
+
+        # ---- 显示开关：是否显示文件后缀名 ----
+        # 需求：默认**不**显示后缀（`报告.docx` 显示成 `报告`）。
+        # 这里只改界面上的文字，磁盘上的文件名一个字都不会动。
+        display_row = QHBoxLayout()
+        display_row.setSpacing(8)
+        self.chk_extensions = QCheckBox("显示文件后缀名")
+        self.chk_extensions.setToolTip(
+            "打开后文件名带后缀显示（报告.docx）；\n"
+            "关闭时只显示主名（报告）。\n"
+            "无论开关如何，磁盘上的真实文件名都不会改变。")
+        self.chk_extensions.toggled.connect(self._on_extensions_toggled)
+        self.chk_extensions.blockSignals(True)
+        self.chk_extensions.setChecked(self.extensions_visible())
+        self.chk_extensions.blockSignals(False)
+        display_row.addWidget(self.chk_extensions)
+        display_row.addStretch(1)
+        root.addLayout(display_row)
 
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
@@ -297,70 +312,33 @@ class MainPanel(QWidget):
         layout.addLayout(history_actions)
         return widget
 
-    def _apply_glass_palette(self) -> None:
-        """把窗口调色板换成深色，兜住 QSS 没写到的控件。"""
-        roles = theme_mod.glass_palette_roles()
-        pal = self.palette()
-        mapping = {
-            QPalette.ColorRole.Window: roles["window"],
-            QPalette.ColorRole.WindowText: roles["text"],
-            QPalette.ColorRole.Base: roles["base"],
-            QPalette.ColorRole.AlternateBase: roles["alternate"],
-            QPalette.ColorRole.Text: roles["text"],
-            QPalette.ColorRole.Button: roles["button"],
-            QPalette.ColorRole.ButtonText: roles["text"],
-            QPalette.ColorRole.ToolTipBase: roles["button"],
-            QPalette.ColorRole.ToolTipText: roles["text"],
-            QPalette.ColorRole.Highlight: roles["highlight"],
-            QPalette.ColorRole.HighlightedText: roles["highlight_text"],
-            QPalette.ColorRole.PlaceholderText: roles["sub"],
-        }
-        for role, value in mapping.items():
-            pal.setColor(role, QColor(value))
-        self.setPalette(pal)
-
     def apply_theme(self, dark: bool) -> None:
         # 主面板固定用深色磨砂玻璃（需求如此），所以 dark 只影响别处的窗口；
         # 这里保留参数是为了和调用方（tray_app）的接口保持一致。
         self.dark = dark
         self._restyle()
 
-    def _restyle(self) -> None:
-        """套用玻璃卡片样式。
-
-        拿不到磨砂（老系统 / 被策略挡住）时把卡片底色加浓一档——
-        没有模糊还那么透，文字会看不清。
-        """
-        sheet = theme_mod.stylesheet(self.dark, glass=True)
-        if not self._glass_mode:
-            sheet += ("\n#MainCard { background: rgba(24, 26, 32, 0.90);"
-                      " border-color: rgba(255, 255, 255, 0.14); }\n")
-        self.setStyleSheet(sheet)
-
     # ------------------------------------------------------------------
-    # 悬浮玻璃卡片：DWM 磨砂 + 圆角裁剪
+    # 显示文件后缀名
     # ------------------------------------------------------------------
-    def _ensure_glass(self) -> None:
-        """开磨砂（只在第一次显示时做一次）。"""
-        if self._glass_ready:
-            return
-        self._glass_ready = True
-        self._glass_mode = acrylic.enable_blur(
-            self, radius=theme_mod.GLASS_RADIUS,
-            tint=GLASS_TINT, opacity=GLASS_TINT_ALPHA)
-        config.log(f"主面板磨砂：{self._glass_mode or '不可用，退回纯半透明'}"
-                   f"（{acrylic.describe()}）")
-        self._restyle()
+    def extensions_visible(self) -> bool:
+        """当前是否显示文件后缀名（默认关闭）。"""
+        return bool(self.cfg.get("show_extensions", False))
 
-    def showEvent(self, event) -> None:  # noqa: N802
-        super().showEvent(event)
-        self._ensure_glass()
+    def _on_extensions_toggled(self, checked: bool) -> None:
+        # 只落配置 + 重画列表：磁盘上的文件名完全不动
+        self.cfg.set("show_extensions", bool(checked))
+        self.refresh_items()
+        self.extensions_changed.emit()
 
-    def resizeEvent(self, event) -> None:  # noqa: N802
-        super().resizeEvent(event)
-        # SetWindowRgn 不会跟着窗口缩放，尺寸一变就得重新裁一次
-        if self._glass_mode:
-            acrylic.apply_round_region(self, theme_mod.GLASS_RADIUS)
+    def sync_extensions(self) -> None:
+        """把开关同步成配置里的值（设置窗口改过之后由主程序调用）。"""
+        want = self.extensions_visible()
+        if self.chk_extensions.isChecked() != want:
+            self.chk_extensions.blockSignals(True)
+            self.chk_extensions.setChecked(want)
+            self.chk_extensions.blockSignals(False)
+        self.refresh_items()
 
     # ------------------------------------------------------------------
     # 拖动 / 快捷键
@@ -450,9 +428,12 @@ class MainPanel(QWidget):
     def refresh_items(self) -> None:
         self.items_tree.clear()
         self._row_by_key.clear()
+        show_ext = self.extensions_visible()
         for item in self._items:
+            # 显示名可能剥掉了后缀，但真实路径挂在 UserRole 上，操作不受影响
             node = QTreeWidgetItem([
-                item.name, item.kind_label, item.size_text,
+                engine.display_name(item.name, item.is_dir, show_ext),
+                item.kind_label, item.size_text,
                 engine.time_text(item.mtime),
             ])
             node.setData(0, int(Qt.ItemDataRole.UserRole), str(item.path))

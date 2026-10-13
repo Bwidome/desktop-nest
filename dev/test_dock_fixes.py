@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-用户报告的 6 个问题 —— 回归测试
-==============================
+用户报告的问题 —— 回归测试
+==========================
 1. 启动崩溃：`'DesktopBrowser' object has no attribute 'loader'`
    （loader 在 `_build_ui()` 之后才创建，而 `_build_ui()` 末尾就会用到它）
 2. 添加常用软件后图标识别失败
 3. 点击常用软件后高亮不消失
-4. 收起分页行时菜单栏大小不跟着变
+4. 菜单栏上那排分页条目已整行移除，只剩主行
 5. 回到桌面时菜单栏该自动出现（除非用户主动隐藏过）
 6. 全屏应用（看视频等）时菜单栏要让开，不遮挡
+7. 收纳面板不是普通应用窗口，而是贴底的**磨砂玻璃上拉浮层**
+8. 打开 / 反复翻页收纳面板时，底部菜单栏不会无故消失
 
 用法：python dev/test_dock_fixes.py
 """
@@ -173,29 +175,30 @@ def main() -> int:
     check("选中状态也清掉了", tray.desktop_browser._selected is None)
 
     print()
-    print("── 4. 收起分页行时菜单栏高度要变小 ──")
+    print("── 4. 菜单栏上的分页行已整行移除，只剩主行 ──")
     dock = tray.dock
     dock.show_bar()
     app.processEvents()
-    height_open = dock.height()
-    dock.toggle_strip()
-    app.processEvents()
-    time.sleep(0.1)
-    app.processEvents()
-    height_closed = dock.height()
-    check("收起后高度确实变小了", height_closed < height_open,
-          f"{height_open} -> {height_closed}")
-    check("收起后分页行不可见", not dock.strip_panel.isVisible())
-    check("收起后窗口尺寸贴近内容（不留空白）",
-          abs(height_closed - dock.sizeHint().height()) <= 24,
-          f"height={height_closed} sizeHint={dock.sizeHint().height()}")
-
-    dock.toggle_strip()
-    app.processEvents()
-    time.sleep(0.1)
-    app.processEvents()
-    check("再展开高度变回去", dock.height() > height_closed,
-          f"{height_closed} -> {dock.height()}")
+    check("菜单栏上没有分页行 UI",
+          not hasattr(dock, "strip_panel") and not hasattr(dock, "strip_row")
+          and not hasattr(dock, "strip_page_label")
+          and not hasattr(dock, "btn_toggle_strip"),
+          str([a for a in ("strip_panel", "strip_row", "strip_page_label",
+                           "btn_toggle_strip") if hasattr(dock, a)]))
+    check("分页相关方法也删掉了",
+          not hasattr(dock, "toggle_strip") and not hasattr(dock, "rebuild_strip")
+          and not hasattr(dock, "strip_pages"))
+    check("主行控件齐全：桌面整理 / ＋ / ⚙ / ✕",
+          hasattr(dock, "desktop_btn") and hasattr(dock, "add_btn")
+          and hasattr(dock, "settings_btn") and hasattr(dock, "btn_hide_dock"))
+    check("窗口尺寸贴近内容（不留空白）",
+          abs(dock.height() - dock.sizeHint().height()) <= 24,
+          f"height={dock.height()} sizeHint={dock.sizeHint().height()}")
+    check("收纳内容仍保留为「＋ 添加」的候选",
+          len(dock._items) == len(tray.nest_items),
+          f"{len(dock._items)} vs {len(tray.nest_items)}")
+    check("配置里也不再有分页行开关",
+          "dock_strip_visible" not in config_mod.DEFAULTS)
 
     print()
     print("── 5. 回到桌面自动显示 / 用户隐藏后不自动弹 ──")
@@ -262,6 +265,8 @@ def main() -> int:
             if (rect.left <= dock_rect.left() and rect.right >= dock_rect.right()
                     and rect.bottom >= dock_rect.top()):
                 expected = True
+        if tray._foreground_is_self():            # 自己的窗口不算（新增的排除项）
+            expected = False
         if tray._desktop_is_foreground():         # 桌面本身在前台不算
             expected = False
 
@@ -326,7 +331,87 @@ def main() -> int:
     app.processEvents()
 
     print()
-    print("── 9. Dock 图标按钮要装得下自己的文字（高 DPI 下别叠字）──")
+    print("── 8b. 收纳面板是「磨砂玻璃浮层」，不是白色矩形弹窗 ──")
+    from qt_compat import QPalette
+    from widgets import GlassCardMixin
+
+    check("用了共享的玻璃外观（GlassCardMixin）",
+          isinstance(browser, GlassCardMixin))
+    sheet = browser.styleSheet()
+    check("顶层窗口自己不画底（画了就把磨砂盖住了）",
+          "#BrowserRoot" in sheet and "background: transparent" in sheet)
+    check("卡片 #Popup 是深色半透明底（不是纯白）",
+          "#Popup" in sheet and "rgba(24, 26, 32" in sheet,
+          "样式表里找不到 #Popup 的深色底")
+    check("卡片是大圆角（22px，和主面板一致）",
+          "border-radius: 22px" in sheet)
+    check("卡片有 1px 亮边（玻璃质感）",
+          "border: 1px solid" in sheet and "rgba(255, 255, 255" in sheet)
+    check("窗口调色板也换成了深色（兜住 QSS 没写到的控件）",
+          browser.palette().color(QPalette.ColorRole.Window).lightness() < 128,
+          str(browser.palette().color(QPalette.ColorRole.Window).name()))
+
+    print()
+    print("── 9. 打开 / 反复翻页收纳面板时，菜单栏不会消失 ──")
+    panel = tray.desktop_browser
+    tray.cfg.set("dock_hidden_by_user", False)
+    tray.cfg.set("dock_visible", True)
+    tray.cfg.set("dock_auto_show", True)
+    dock.show_bar()
+    app.processEvents()
+    check("Dock 初始可见", dock.isVisible())
+    check("面板关着时 _dock_in_use 为假", tray._dock_in_use() is False)
+
+    panel.show_window()
+    app.processEvents()
+    check("面板打开时 _dock_in_use 为真", tray._dock_in_use() is True)
+
+    # 关键：把自己的窗口当成"前台窗口"，绝不能被判成"别的程序在遮挡菜单栏"
+    real_hwnd = tray._foreground_hwnd
+    try:
+        tray._foreground_hwnd = lambda: int(panel.winId())
+        check("识别出前台窗口是自己", tray._foreground_is_self() is True)
+        check("自己的面板不算「全屏遮挡」",
+              tray._foreground_is_fullscreen() is False)
+        tray._foreground_hwnd = lambda: int(dock.winId())
+        check("Dock 自己也不算「全屏遮挡」",
+              tray._foreground_is_fullscreen() is False)
+    finally:
+        tray._foreground_hwnd = real_hwnd
+
+    # 浮层位置：底边正好落在菜单栏顶边之上（不压住 Dock）
+    dock_top = dock.geometry().top()
+    panel_bottom = panel.geometry().bottom()
+    check("面板底边让开菜单栏（贴在 Dock 上方，不压住它）",
+          panel_bottom <= dock_top,
+          f"面板底 {panel_bottom} vs Dock 顶 {dock_top}")
+
+    survived = True
+    for _round in range(3):
+        for page in range(panel._page_count()):
+            panel.goto_page(page)
+            tray._auto_show_tick()
+            app.processEvents()
+            if not dock.isVisible():
+                survived = False
+        panel.set_per_page(21)
+        app.processEvents()
+        panel.set_per_page(14)
+        app.processEvents()
+        if not dock.isVisible():
+            survived = False
+    check("反复翻页 / 换每页数量后 Dock 依然稳定可见",
+          survived and dock.isVisible())
+    check("翻页没有篡改菜单栏「显示/隐藏」状态变量",
+          bool(tray.cfg.get("dock_visible", True)) is True
+          and bool(tray.cfg.get("dock_hidden_by_user", False)) is False,
+          f"visible={tray.cfg.get('dock_visible')} "
+          f"by_user={tray.cfg.get('dock_hidden_by_user')}")
+    panel.hide()
+    app.processEvents()
+
+    print()
+    print("── 10. Dock 图标按钮要装得下自己的文字（高 DPI 下别叠字）──")
     # 原来 DockIcon 写死 max(icon_size+20, 68)：字号用 pt 会跟着 DPI 放大，
     # 写死的宽度不会，于是 125% 缩放下「任务管理器」装不下、相邻两项文字叠在一起。
     from qt_compat import QFontMetrics

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import ctypes
 from ctypes import wintypes
@@ -105,6 +106,7 @@ class TrayApp(QWidget):
         self.panel.request_settings.connect(self.open_settings)
         self.panel.request_quit.connect(self.quit_app)
         self.panel.quick_changed.connect(self._on_quick_changed)
+        self.panel.extensions_changed.connect(self._on_extensions_changed)
 
         # ---- 收纳面板（Dock 左边第一个控件）----
         self.desktop_browser = DesktopBrowser(cfg)
@@ -123,6 +125,9 @@ class TrayApp(QWidget):
         self.dock.quick_changed.connect(self._on_quick_changed)
         self.dock.request_refresh.connect(self.refresh)
         self.dock.hide_requested.connect(self._on_dock_hidden)
+        # 收纳面板是"坐在"菜单栏上方的浮层：把 Dock 的真实高度交给它，
+        # 底边才会正好落在菜单栏顶边之上（菜单栏变高也不会被压住）。
+        self.desktop_browser.set_bottom_reserve(self._dock_reserve)
 
         # ---- 托盘 ----
         # 托盘图标直接复用程序图标（同一套"抽屉"造型，见 widgets.app_icon）
@@ -232,13 +237,6 @@ class TrayApp(QWidget):
         action_dock.setChecked(dock_visible)
         action_dock.triggered.connect(lambda _checked: self.toggle_dock())
 
-        # 分页行也能单独收起（菜单栏只剩常用启动那一行）
-        strip_visible = bool(self.cfg.get("dock_strip_visible", True))
-        action_strip = self.menu.addAction("底栏显示分页行")
-        action_strip.setCheckable(True)
-        action_strip.setChecked(strip_visible)
-        action_strip.triggered.connect(self._toggle_dock_strip)
-
         action_auto = self.menu.addAction("回到桌面自动显示菜单栏")
         action_auto.setCheckable(True)
         action_auto.setChecked(bool(self.cfg.get("dock_auto_show", True)))
@@ -345,6 +343,9 @@ class TrayApp(QWidget):
         self.desktop_browser.apply_theme(dark)
         self.dock.apply_theme(True)
         self.dock.rebuild()
+        # 设置窗口里也能改「显示文件后缀名」，回来要把两处界面同步一遍
+        self.panel.sync_extensions()
+        self.desktop_browser.apply_extensions()
         self.refresh()
 
     # ------------------------------------------------------------------
@@ -353,6 +354,15 @@ class TrayApp(QWidget):
     def show_desktop_files(self) -> None:
         """打开收纳面板（上拉菜单）。再点一次会收起，见 toggle_desktop_files。"""
         self.desktop_browser.show_window()
+
+    def _dock_reserve(self) -> int:
+        """收纳面板贴底时要给底部菜单栏让开的高度（含一点间隙）。"""
+        try:
+            if self.dock.isVisible():
+                return int(self.dock.height()) + 14
+        except Exception:
+            pass
+        return 44
 
     def recover_leftovers(self) -> None:
         """恢复上次没收干净的内容。
@@ -467,10 +477,13 @@ class TrayApp(QWidget):
             "菜单栏已隐藏。\n右键托盘图标 → 勾选「显示底部菜单栏」可以再打开。",
             QSystemTrayIcon.MessageIcon.Information, 5000)
 
-    def _toggle_dock_strip(self) -> None:
-        """收起 / 展开菜单栏上的分页行。"""
-        self.dock.toggle_strip()
-        self.rebuild_tray_menu()
+    def _on_extensions_changed(self) -> None:
+        """「显示文件后缀名」开关变了：收纳面板 + 主面板列表一起重画。
+
+        只改界面文字，磁盘上的文件名一个字都不动。
+        """
+        self.desktop_browser.apply_extensions()
+        self.panel.refresh_items()
 
     # ------------------------------------------------------------------
     # 回到桌面时自动显示菜单栏
@@ -498,6 +511,55 @@ class TrayApp(QWidget):
         except Exception:
             return ""
 
+    @staticmethod
+    def _foreground_hwnd() -> int:
+        try:
+            import ctypes
+
+            return int(ctypes.windll.user32.GetForegroundWindow() or 0)
+        except Exception:
+            return 0
+
+    def _foreground_is_self(self) -> bool:
+        """前台窗口是不是本程序自己的窗口。
+
+        **这是"翻页时菜单栏时不时消失"的根因修复。**
+        收纳面板就贴在菜单栏正上方、宽度也盖得住菜单栏那一带；不把自己人排除掉的话，
+        下面 `_foreground_is_fullscreen()` 的第 3 条（"窗口盖住了菜单栏所在区域"）
+        就会把**我们自己刚打开的收纳面板**当成"挡住菜单栏的别的程序"，
+        于是自动避让逻辑立刻把菜单栏收起来——表现就是点开面板 / 翻页时菜单栏闪没。
+
+        先比窗口句柄（最准，也不依赖 PID），再比进程号兜住菜单、气泡这些临时窗口。
+        """
+        hwnd = self._foreground_hwnd()
+        if not hwnd:
+            return False
+        for widget in (getattr(self, "panel", None),
+                       getattr(self, "desktop_browser", None),
+                       getattr(self, "dock", None)):
+            try:
+                if widget is not None and int(widget.winId()) == hwnd:
+                    return True
+            except Exception:
+                continue
+        try:
+            import ctypes
+
+            pid = ctypes.c_ulong(0)
+            ctypes.windll.user32.GetWindowThreadProcessId(
+                ctypes.c_void_p(hwnd), ctypes.byref(pid))
+            return bool(pid.value) and int(pid.value) == os.getpid()
+        except Exception:
+            return False
+
+    def _dock_in_use(self) -> bool:
+        """菜单栏此刻是不是"正在被用"——收纳面板开着（翻页 / 搜索）就算。
+
+        避让逻辑只该响应**别的**程序的前台窗口状态；收纳面板是自己人开的浮层，
+        它开着的时候菜单栏必须稳稳留着，绝不能因为我们自己弹了个面板就把菜单栏藏了。
+        """
+        browser = getattr(self, "desktop_browser", None)
+        return bool(browser is not None and browser.isVisible())
 
     def _foreground_is_fullscreen(self) -> bool:
         """前台窗口是不是"占满屏幕"、会挡住菜单栏的类型。
@@ -510,6 +572,9 @@ class TrayApp(QWidget):
         注意：**不能用 `IsZoomed()` 判断最大化**。实测 Chrome 这类自绘标题栏的
         程序不设置 `WS_MAXIMIZE` 风格位，`IsZoomed` 一直返回 0，
         于是"打开浏览器菜单栏不让开"就修不好。量外框尺寸才准。
+
+        另外：**本程序自己的窗口一律不算**（见 `_foreground_is_self`）——
+        收纳面板盖住菜单栏那一条是设计如此，不是"别的程序在遮挡"。
         """
         try:
             import ctypes
@@ -518,6 +583,8 @@ class TrayApp(QWidget):
             user32 = ctypes.windll.user32
             hwnd = user32.GetForegroundWindow()
             if not hwnd:
+                return False
+            if self._foreground_is_self():         # 自己的窗口不算
                 return False
             if self._desktop_is_foreground():      # 桌面自己不算
                 return False
@@ -573,11 +640,23 @@ class TrayApp(QWidget):
         * 人回到桌面 → 自动显示（除非用户主动点过隐藏）；
         * 有人在全屏看视频 / 演示 → 自动让开，不遮挡内容；
           全屏结束后再自己回来。
+
+        ⚠️ 这里**只动窗口的可见性**（`show_bar` / `hide_bar`），
+        绝不改 `dock_visible` / `dock_hidden_by_user` 这些状态变量——
+        否则"打开收纳面板"会被误当成"用户把菜单栏关了"，之后再也不自动弹回来。
         """
         try:
             if bool(self.cfg.get("dock_hidden_by_user", False)):
-                return
+                return                       # 用户手动关的：保持隐藏，绝不自动恢复
             if not bool(self.cfg.get("dock_auto_show", True)):
+                return
+            if self._dock_in_use():
+                # 收纳面板开着（翻页 / 搜索）时菜单栏必须稳住：不让开，也不隐藏。
+                # 之前"翻页时菜单栏时不时消失"就是这里漏了自己人的判断。
+                self._dock_hidden_for_fullscreen = False
+                if not self.dock.isVisible() and bool(self.cfg.get("dock_visible", True)):
+                    self.dock.show_bar()
+                    self.rebuild_tray_menu()
                 return
 
             fullscreen = self._foreground_is_fullscreen()

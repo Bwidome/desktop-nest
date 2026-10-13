@@ -75,7 +75,7 @@ DARK = {
 
 RADIUS = 10
 RADIUS_SMALL = 7
-# 主面板那张悬浮卡片用的大圆角
+# 悬浮玻璃卡片用的大圆角（主面板 + 收纳面板共用）
 GLASS_RADIUS = 22
 FONT_FAMILY = '"Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif'
 
@@ -118,9 +118,32 @@ GLASS = {
     "popup_border": "rgba(255, 255, 255, 0.12)",
 }
 
+# DWM 磨砂的着色。要和 GLASS['card'] 对齐着看：
+# 这两层**都**是深色，都调浓就会叠成一块黑板。
+# 0.58（卡片底）+ 0.26（DWM 着色）叠出来约等于 0.69 的观感：
+# 既看得清字，又明显透得出背后的东西。
+GLASS_TINT = "#181A20"
+GLASS_TINT_ALPHA = 0.26
+
+# 拿不到磨砂（老系统 / 被策略挡住）时，卡片底色加浓一档——
+# 没有模糊还那么透，文字会看不清。
+GLASS_FALLBACK = ("background: rgba(24, 26, 32, 0.90);"
+                  " border-color: rgba(255, 255, 255, 0.14);")
+
 
 def palette(dark: bool = False) -> dict:
     return dict(DARK if dark else LIGHT)
+
+
+def glass_palette() -> dict:
+    """玻璃卡片**内部控件**用的配色（深色 + GLASS 覆盖）。
+
+    和 `palette(dark)` 的区别：玻璃卡片恒定深色，不跟明暗主题走，
+    所以里面的卡片文字/高亮不能拿浅色调色板，否则深底配深字。
+    """
+    c = dict(DARK)
+    c.update(GLASS)
+    return c
 
 
 def glass_palette_roles() -> dict:
@@ -145,8 +168,16 @@ def glass_palette_roles() -> dict:
 def stylesheet(dark: bool = False, *, glass: bool = False) -> str:
     """生成整份 QSS。
 
-    glass=True 时把配色换成 `GLASS`（半透明深色），并额外加上主面板那张
-    悬浮卡片的规则——磨砂玻璃外观靠它 + `acrylic.py` 的 DWM 模糊一起实现。
+    glass=True 时把配色换成 `GLASS`（半透明深色），并额外加上两张悬浮卡片的
+    规则——磨砂玻璃外观靠它 + `acrylic.py` 的 DWM 模糊一起实现。
+
+    两张卡片：
+    * `#MainCard` —— 主面板
+    * `#Popup`    —— 收纳面板（Dock 第一个控件点开的那个上拉浮层）
+
+    ⚠️ 玻璃规则块必须放在**整份样式表的最后**。放在中间的话，后面那些
+    `#Popup { background: ... }` 之类的普通规则会把玻璃规则盖掉——
+    玻璃看起来"没生效"，其实是被后写的规则赢了。
     """
     c = palette(dark)
     if glass:
@@ -155,15 +186,25 @@ def stylesheet(dark: bool = False, *, glass: bool = False) -> str:
     glass_block = ""
     if glass:
         glass_block = f"""
-/* ---------- 主面板：悬浮磨砂玻璃卡片 ---------- */
-/* 顶层窗口自己不画底（画了就把磨砂盖住了），深色半透明只画在这张卡片上 */
-#MainPanel {{ background: transparent; }}
-#MainCard {{
+/* ========== 悬浮磨砂玻璃卡片（主面板 + 收纳面板） ========== */
+/* 顶层窗口自己不画底（画了就把磨砂盖住了），深色半透明只画在这两张卡片上 */
+#MainPanel, #BrowserRoot {{ background: transparent; }}
+#MainCard, #Popup {{
     background: {c['card']};
     border: 1px solid {c['card_border']};
     border-radius: {GLASS_RADIUS}px;
 }}
-/* 玻璃卡片里的树：底色必须透，否则会在卡片上糊一块不透明的白 */
+/* 卡片里的顶栏/底栏是**内嵌**的，圆角要比卡片小 1px（卡片有 1px 边框），
+   否则它们的直角会戳到卡片圆角外面去 */
+#Toolbar {{
+    border-top-left-radius: {GLASS_RADIUS - 1}px;
+    border-top-right-radius: {GLASS_RADIUS - 1}px;
+}}
+#FooterBar {{
+    border-bottom-left-radius: {GLASS_RADIUS - 1}px;
+    border-bottom-right-radius: {GLASS_RADIUS - 1}px;
+}}
+/* 玻璃卡片里的树 / 网格：底色必须透，否则会在卡片上糊一块不透明的白 */
 QTreeWidget {{
     background: transparent;
     border: none;
@@ -181,6 +222,8 @@ QHeaderView::section {{
     padding: 6px 8px;
 }}
 QTabWidget::pane {{ background: {c['surface']}; }}
+QScrollArea {{ background: transparent; border: none; }}
+QScrollArea > QWidget > QWidget {{ background: transparent; }}
 /* ---------- 弹出类控件必须**不透明** ---------- */
 /* 它们会继承这张玻璃样式表：底色一旦跟着半透明，右键菜单、消息框、
    提示气泡就会"看不见"。所以这里单独给一层不透明的深色底。 */
@@ -230,7 +273,7 @@ QDialog, QMainWindow {{
     border: 1px solid {c['border']};
     border-radius: {RADIUS}px;
 }}
-{glass_block}
+
 /* ---------- 上拉菜单（收纳面板）---------- */
 #Popup {{
     background: {c['popup']};
@@ -461,15 +504,6 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
 }}
 #DockNav:hover {{ background: rgba(255, 255, 255, 40); }}
 #DockNav:disabled {{ color: rgba(233, 235, 239, 70); }}
-#DockPage {{
-    color: rgba(233, 235, 239, 170);
-    font-size: 8.25pt;
-}}
-#DockEmpty {{
-    color: rgba(233, 235, 239, 120);
-    font-size: 8.25pt;
-    padding-left: 10px;
-}}
 #DockDivider {{
     background: rgba(255, 255, 255, 48);
     border: none;
@@ -592,4 +626,4 @@ QComboBox QAbstractItemView {{
     selection-color: {c['accent']};
     padding: 4px;
 }}
-"""
+{glass_block}"""

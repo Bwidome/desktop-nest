@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-给主面板拍一张宣传图（存到 `shots/panel-main.png`）
-=================================================
+给三张界面拍宣传图
+=================
+* `shots/panel-main.png` —— 主面板（悬浮磨砂玻璃卡片）
+* `shots/dock.png` —— 底部菜单栏（只有主行，没有分页行）
+* `shots/popup-glass.png` —— 收纳面板（Dock 第一个控件点开的上拉磨砂浮层）+ 底部菜单栏
+
 磨砂玻璃是 **DWM 在合成阶段做的**，Qt 自己 `grab()` 出来的图里没有模糊，
 所以必须：摆一块高对比背景板 → 真把窗口显示出来 → **截整屏** → 裁掉多余部分。
 
@@ -29,6 +33,10 @@ from qt_compat import (QApplication, QColor, QLabel, QLinearGradient, QPainter,
 BACK_W, BACK_H = 1400, 860
 PANEL_W, PANEL_H = 940, 680
 MARGIN = 26
+MARGIN_SMALL = 12
+# 贴底的窗口（菜单栏 / 收纳面板）下面只留一点点：多留就会跑到屏幕外，
+# 截出来要么是黑边、要么把任务栏一起截进来。
+BOTTOM_MARGIN = 8
 
 
 def build_backdrop() -> QWidget:
@@ -90,6 +98,8 @@ def main() -> int:
 
     import config as config_mod
     import engine
+    from desktop_browser import DesktopBrowser
+    from dock import DockBar
     from panel import MainPanel
 
     cfg = config_mod.Config(str(base / "config.json"))
@@ -100,7 +110,7 @@ def main() -> int:
                              ("产品路线图.pptx", "file", 1_800_000),
                              ("简历.pdf", "file", 610_000),
                              ("截图.png", "file", 420_000)):
-        items.append(engine.RepoItem(base / name, Path(name).stem,
+        items.append(engine.RepoItem(base / name, name,
                                      kind == "folder", kind, size, 1_760_000_000))
 
     panel = MainPanel(cfg)
@@ -110,29 +120,78 @@ def main() -> int:
                                     "count": 6, "moves": []}])
     panel.move(300, 130)
 
-    def shoot():
+    dock = DockBar(cfg)
+    browser = DesktopBrowser(cfg)
+    browser.set_items(items)
+    browser.set_bottom_reserve(lambda: dock.height() + 14)
+
+    def grab_region(x0, y0, x1, y1, name: str) -> None:
+        img = app.primaryScreen().grabWindow(0).toImage()
+        # 夹进屏幕范围：贴底窗口再加一圈边距就会超出屏幕（截出黑边或带上任务栏）
+        x0 = max(0, int(x0))
+        y0 = max(0, int(y0))
+        x1 = min(img.width(), int(x1))
+        y1 = min(img.height(), int(y1))
+        out = HERE / "shots"
+        out.mkdir(parents=True, exist_ok=True)
+        crop = img.copy(x0, y0, max(1, x1 - x0), max(1, y1 - y0))
+        crop.save(str(out / name))
+        print(f"已保存 shots/{name}  {crop.width()}x{crop.height()}")
+
+    # ---- 第一张：主面板 ----
+    def shoot_panel():
         panel.show()
         app.processEvents()
-        QTimer.singleShot(1500, capture)
+        QTimer.singleShot(1500, capture_panel)
 
-    def capture():
+    def capture_panel():
         app.processEvents()
         dpr = panel.devicePixelRatio() or 1.0
         tl = panel.mapToGlobal(panel.rect().topLeft())
-        x0 = int(tl.x() * dpr) - MARGIN
-        y0 = int(tl.y() * dpr) - MARGIN
-        w = int(round(panel.width() * dpr)) + MARGIN * 2
-        h = int(round(panel.height() * dpr)) + MARGIN * 2
-        img = app.primaryScreen().grabWindow(0).toImage()
-        out = HERE / "shots"
-        out.mkdir(parents=True, exist_ok=True)
-        crop = img.copy(x0, y0, w, h)
-        crop.save(str(out / "panel-main.png"))
-        print("已保存 shots/panel-main.png  %dx%d" % (crop.width(), crop.height()))
+        grab_region(tl.x() * dpr - MARGIN, tl.y() * dpr - MARGIN,
+                    (tl.x() + panel.width()) * dpr + MARGIN,
+                    (tl.y() + panel.height()) * dpr + MARGIN, "panel-main.png")
         print("磨砂方案：%s（%s）" % (panel._glass_mode or "不可用", acrylic_describe()))
+        panel.hide()
+        app.processEvents()
+        QTimer.singleShot(400, shoot_dock)
+
+    # ---- 第二张：底部菜单栏（只有主行，没有分页行）----
+    def shoot_dock():
+        dock.show_bar()
+        app.processEvents()
+        QTimer.singleShot(900, capture_dock)
+
+    def capture_dock():
+        app.processEvents()
+        dpr = dock.devicePixelRatio() or 1.0
+        tl = dock.mapToGlobal(dock.rect().topLeft())
+        # 菜单栏本身很矮，边距收紧一点，免得把背景里别的东西一起框进来
+        grab_region(tl.x() * dpr - MARGIN_SMALL, tl.y() * dpr - MARGIN_SMALL,
+                    (tl.x() + dock.width()) * dpr + MARGIN_SMALL,
+                    (tl.y() + dock.height()) * dpr + BOTTOM_MARGIN, "dock.png")
+        QTimer.singleShot(300, shoot_popup)
+
+    # ---- 第三张：收纳面板（上拉磨砂浮层）+ 底部菜单栏 ----
+    def shoot_popup():
+        browser.show_window()
+        app.processEvents()
+        QTimer.singleShot(1500, capture_popup)
+
+    def capture_popup():
+        app.processEvents()
+        dpr = browser.devicePixelRatio() or 1.0
+        p_tl = browser.mapToGlobal(browser.rect().topLeft())
+        d_tl = dock.mapToGlobal(dock.rect().topLeft())
+        x0 = min(p_tl.x(), d_tl.x()) * dpr - MARGIN
+        y0 = min(p_tl.y(), d_tl.y()) * dpr - MARGIN
+        x1 = max(p_tl.x() + browser.width(), d_tl.x() + dock.width()) * dpr + MARGIN
+        y1 = max(p_tl.y() + browser.height(), d_tl.y() + dock.height()) * dpr + BOTTOM_MARGIN
+        grab_region(x0, y0, x1, y1, "popup-glass.png")
+        print("磨砂方案：%s（%s）" % (browser._glass_mode or "不可用", acrylic_describe()))
         app.quit()
 
-    QTimer.singleShot(700, shoot)
+    QTimer.singleShot(700, shoot_panel)
     app.exec()
     return 0
 

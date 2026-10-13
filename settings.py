@@ -7,7 +7,7 @@
 
 分三块：
 * 收纳行为：启动自动收纳 / 退出自动还原 / 隐藏桌面图标
-* 外观与启动：主题、主面板显示时机、桌面位置
+* 外观与启动：主题、文件后缀显示开关、主面板显示时机、桌面位置
 * 其他：开机自启、缓存、配置目录
 """
 
@@ -74,6 +74,13 @@ class SettingsDialog(QDialog):
         self.chk_dark = QCheckBox("使用深色主题（底部菜单栏固定深色）")
         self.chk_dark.toggled.connect(self._preview_theme)
         root.addWidget(self.chk_dark)
+
+        self.chk_extensions = QCheckBox(
+            "显示文件后缀名（关闭时「报告.docx」显示为「报告」）")
+        self.chk_extensions.setToolTip(
+            "只影响界面上的文字：关掉后缀时列表里只显示主名，\n"
+            "磁盘上的真实文件名不会改变。搜索两种写法都能命中。")
+        root.addWidget(self.chk_extensions)
 
         panel_row = QHBoxLayout()
         panel_row.setSpacing(8)
@@ -173,6 +180,7 @@ class SettingsDialog(QDialog):
         self.chk_restore_exit.setChecked(bool(self.cfg.get("restore_on_exit", True)))
         self.chk_hide_icons.setChecked(bool(self.cfg.get("hide_desktop_icons", True)))
         self.chk_dark.setChecked(bool(self.cfg.get("dark")))
+        self.chk_extensions.setChecked(bool(self.cfg.get("show_extensions", False)))
         self.desktop_edit.setText(str(self.cfg.desktop))
 
         mode = str(self.cfg.get("panel_on_start", "first"))
@@ -220,6 +228,7 @@ class SettingsDialog(QDialog):
             "auto_take_on_start": bool(self.chk_auto_take.isChecked()),
             "restore_on_exit": bool(self.chk_restore_exit.isChecked()),
             "hide_desktop_icons": bool(self.chk_hide_icons.isChecked()),
+            "show_extensions": bool(self.chk_extensions.isChecked()),
             "panel_on_start": self.panel_mode.currentData() or "first",
         })
 

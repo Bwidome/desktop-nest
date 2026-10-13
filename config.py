@@ -13,6 +13,7 @@ window_geometry 弹出窗口的位置和大小，记住上次拖动结果
 quick_items     托盘"常用启动"列表（持久化，重启不丢）
 autostart       是否开机自启
 last_migrate    最近一次收纳的时间戳，用于首次启动提示"是否还原"
+show_extensions 界面是否显示文件后缀名（默认关闭；只改显示，不动磁盘文件）
 """
 
 from __future__ import annotations
@@ -167,11 +168,14 @@ DEFAULTS: "dict[str, Any]" = {
     "restore_on_exit": True,         # 退出时自动把东西放回桌面
     "hide_desktop_icons": True,      # 收纳后隐藏桌面图标，做到"完全空白"
     "nest_active": False,            # 当前是否处于"桌面已被收纳"状态
+    # ---- 界面显示 ----
+    # 是否显示文件后缀名。默认**不**显示（`报告.docx` 显示成 `报告`）。
+    # 只影响界面上的文字，磁盘上的真实文件名永远不变。
+    "show_extensions": False,
     # ---- 收纳面板 / 底部菜单栏 ----
     "page_size": 28,                 # 面板每页显示数量
     "panel_geometry": "",
     "dock_visible": True,
-    "dock_strip_visible": True,      # 底栏上面那排分页行是否展开
     "dock_auto_show": True,          # 回到桌面时自动把菜单栏显示出来
     "dock_hidden_by_user": False,    # 用户主动点过隐藏（此时不自动弹）
     "dock_avoid_fullscreen": True,   # 全屏看视频/演示时自动让开，不遮挡

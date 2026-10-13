@@ -37,3 +37,6 @@ crash.log
 .workbuddy-ai/
 Thumbs.db
 desktop.ini
+
+# ---- 离屏截图（test_nest --shots 生成，没有磨砂模糊，不进仓库）----
+shots/offscreen-*.png

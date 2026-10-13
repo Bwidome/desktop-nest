@@ -73,6 +73,24 @@ def kind_of(path: Path) -> str:
     return SUFFIX_TO_KIND.get(path.suffix.lower(), "other")
 
 
+def display_name(name: str, is_dir: bool = False,
+                 show_extensions: bool = False) -> str:
+    """界面上要显示的条目名。
+
+    **只影响显示**：关掉后缀时把扩展名剥掉，磁盘上的文件名一个字都不会动。
+    * 开关打开 → 原样返回（`报告.docx`）；
+    * 开关关闭 → 只留主名（`报告`）；
+    * 文件夹没有扩展名，一律原样返回（否则 `v1.2` 这种名字会被切掉）。
+
+    剥不出主名时（比如名字就是 `.gitignore`）退回原名，绝不返回空串——
+    列表里出现空白行比显示完整名字更让人困惑。
+    """
+    if show_extensions or is_dir:
+        return name
+    stem = Path(name).stem
+    return stem or name
+
+
 def human_size(num: float) -> str:
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if abs(num) < 1024.0 or unit == "TB":

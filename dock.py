@@ -6,16 +6,17 @@
 贴屏幕底部正中一条仿 macOS 的常驻悬浮栏：
 
     ┌────────────────────────────────────────────────────────────┐
-    │ ◀ │ 此电脑  回收站  资料夹  报告.docx  …（一页 7 个）│ ▶ │ ＋添加 │ ⚙ │   ← 分页行
-    ├────────────────────────────────────────────────────────────┤
-    │ [▣ 桌面整理] │ [微][S][E]…（常用启动，图标+名称）            │   ← 主行
+    │ [▣ 桌面整理] │ [微][S][E]…（常用启动，图标+名称）  ＋  ⚙  ✕ │
     └────────────────────────────────────────────────────────────┘
 
-* **第一个控件就是"桌面整理"**，点它打开完整的收纳面板（分页 + 搜索）
-* **分页行直接嵌在菜单栏里**：每页 7 个，`◀ ▶` 翻页，
-  每个都是**快捷方式图标 + 下方名称**，点一下直接打开
-* 主行右边是常用启动项，同样是图标 + 名称
+* **第一个控件就是"桌面整理"**，点它打开完整的收纳面板（分页 + 搜索）；
+  再点一次收起。分页浏览收纳内容**全部在收纳面板里完成**，
+  菜单栏本身不再放那排分页条目（那一行已经删掉）。
+* 中间是常用启动项，同样是图标 + 名称
+* 右边依次是 ＋ 添加、⚙ 设置、✕ 隐藏整条菜单栏
 * 空白处右键出菜单栏设置；按住可左右拖动，位置会记住
+
+外观：深色半透明圆角条（见 theme 里的 `#DockSurface`）。
 """
 
 from __future__ import annotations
@@ -23,22 +24,18 @@ from __future__ import annotations
 from pathlib import Path
 
 from qt_compat import (
-    QColor, QFontMetrics, QFrame, QGridLayout, QHBoxLayout, QIcon, QLabel, QMenu,
+    QColor, QFontMetrics, QFrame, QGridLayout, QHBoxLayout, QIcon, QMenu,
     QPainter, QPainterPath, QPixmap, QPoint, QSize, QToolButton, QVBoxLayout,
     QWidget, Qt, QTimer, Signal,
 )
 
 import engine
-import nest
 import safety
 import theme as theme_mod
-from widgets import (IconLoader, PLACEHOLDER_COLORS, app_icon, letter_pixmap,
-                     pixmap_for)
+from widgets import (IconLoader, PLACEHOLDER_COLORS, app_icon, letter_pixmap)
 
 DOCK_ICON_SIZES = [36, 44, 52, 60]
 DEFAULT_ICON_SIZE = 44
-STRIP_PAGE_SIZE = 7            # 分页行每页几个
-STRIP_ICON = 30
 MIN_MARGIN = 8
 
 
@@ -217,9 +214,8 @@ class DockBar(QWidget):
                               or DEFAULT_ICON_SIZE)
         self._drag_offset = None
         self._buttons: "list[DockIcon]" = []
-        self._strip_buttons: "list[DockIcon]" = []
-        self._strip_page = 0
-        self._strip_items: "list[engine.RepoItem]" = []
+        # 收纳目录内容：不再显示在菜单栏上，只作为「＋ → 从收纳内容里选…」的候选
+        self._items: "list[engine.RepoItem]" = []
 
         # 布局稳定后校正位置用的短定时器（见 _settle）
         self._settle_timer = QTimer(self)
@@ -259,48 +255,6 @@ class DockBar(QWidget):
         column.setContentsMargins(10, 6, 10, 7)
         column.setSpacing(3)
 
-        # ---- 分页行：快捷方式图标 + 名称 ----
-        # 整行放一个容器里，方便一键隐藏/展开
-        self.strip_panel = QWidget(self.surface)
-        strip = QHBoxLayout(self.strip_panel)
-        strip.setContentsMargins(0, 0, 0, 0)
-        strip.setSpacing(2)
-
-        self.btn_strip_prev = QToolButton(self.strip_panel)
-        self.btn_strip_prev.setObjectName("DockNav")
-        self.btn_strip_prev.setText("◀")
-        self.btn_strip_prev.setToolTip("上一页")
-        self.btn_strip_prev.setFixedSize(22, 48)
-        self.btn_strip_prev.clicked.connect(lambda: self.goto_strip_page(self._strip_page - 1))
-
-        self.strip_host = QWidget(self.strip_panel)
-        self.strip_row = QHBoxLayout(self.strip_host)
-        self.strip_row.setContentsMargins(0, 0, 0, 0)
-        self.strip_row.setSpacing(2)
-
-        self.btn_strip_next = QToolButton(self.strip_panel)
-        self.btn_strip_next.setObjectName("DockNav")
-        self.btn_strip_next.setText("▶")
-        self.btn_strip_next.setToolTip("下一页")
-        self.btn_strip_next.setFixedSize(22, 48)
-        self.btn_strip_next.clicked.connect(lambda: self.goto_strip_page(self._strip_page + 1))
-
-        self.strip_page_label = QLabel("1/1", self.strip_panel)
-        self.strip_page_label.setObjectName("DockPage")
-        self.strip_page_label.setFixedWidth(34)
-        self.strip_page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        strip.addWidget(self.btn_strip_prev)
-        strip.addWidget(self.strip_host, 1)
-        strip.addWidget(self.btn_strip_next)
-        strip.addWidget(self.strip_page_label)
-        column.addWidget(self.strip_panel)
-
-        self.strip_divider = QFrame(self.surface)
-        self.strip_divider.setObjectName("DockDivider")
-        self.strip_divider.setFixedHeight(1)
-        column.addWidget(self.strip_divider)
-
         # ---- 应用区：会自动换行，加再多也不会把菜单栏撑出屏幕 ----
         self.apps_flow = FlowRow(self.surface, spacing=3)
         column.addWidget(self.apps_flow)
@@ -312,14 +266,6 @@ class DockBar(QWidget):
 
         # 兼容旧代码里对 self.row 的引用
         self.row = self.control_row
-
-    def _clear_strip(self) -> None:
-        while self.strip_row.count():
-            entry = self.strip_row.takeAt(0)
-            widget = entry.widget()
-            if widget is not None:
-                widget.deleteLater()
-        self._strip_buttons = []
 
     def _clear_row(self) -> None:
         """清空应用区与控制行。"""
@@ -395,14 +341,6 @@ class DockBar(QWidget):
         self.add_btn.clicked.connect(self._show_add_menu)
         self.row.addWidget(self.add_btn)
 
-        # ---- 收起 / 展开上面那排分页 ----
-        self.btn_toggle_strip = QToolButton(self.surface)
-        self.btn_toggle_strip.setObjectName("DockNav")
-        self.btn_toggle_strip.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_toggle_strip.setFixedSize(self._icon_size - 10, self._icon_size - 6)
-        self.btn_toggle_strip.clicked.connect(self.toggle_strip)
-        self.row.addWidget(self.btn_toggle_strip)
-
         self.settings_btn = QToolButton(self.surface)
         self.settings_btn.setObjectName("DockNav")
         self.settings_btn.setText("⚙")
@@ -423,34 +361,8 @@ class DockBar(QWidget):
         self.row.addWidget(self.btn_hide_dock)
 
         self.control_row.addStretch(1)
-        self._apply_strip_visibility()
         self._queue_icons()
         self.refit()
-
-    # ------------------------------------------------------------------
-    # 分页行 显示/隐藏
-    # ------------------------------------------------------------------
-    def strip_visible(self) -> bool:
-        return bool(self.cfg.get("dock_strip_visible", True))
-
-    def toggle_strip(self) -> None:
-        """收起 / 展开上面那排分页，并**立刻把窗口尺寸改成新高度**。
-
-        只切 setVisible 是不够的：顶层窗口不会自动跟着变大小，
-        结果就是收起之后下面留一块空白。这里显式重新计算尺寸再贴回去。
-        """
-        self.cfg.set("dock_strip_visible", not self.strip_visible())
-        self._apply_strip_visibility()
-        self.refit()
-
-    def _apply_strip_visibility(self) -> None:
-        visible = self.strip_visible()
-        self.strip_panel.setVisible(visible)
-        self.strip_divider.setVisible(visible)
-        if hasattr(self, "btn_toggle_strip"):
-            self.btn_toggle_strip.setText("▼" if visible else "▲")
-            self.btn_toggle_strip.setToolTip(
-                "收起上面那排分页" if visible else "展开上面那排分页")
 
     def _max_width(self) -> int:
         """菜单栏允许的最大宽度：屏幕可用宽度留点边距。"""
@@ -525,114 +437,22 @@ class DockBar(QWidget):
                     if path.suffix.lower() == ".lnk" else None)
             self.loader.request(str(path), path, hint, self._icon_size,
                                 entry["name"] or path.name)
-        for item in self._strip_items:
-            hint = (engine.resolve_shortcut_target(item.path)
-                    if item.kind == "shortcut" else None)
-            self.loader.request(str(item.path), item.path, hint, STRIP_ICON,
-                                item.name)
 
     def _on_icon_ready(self, key: str, icon) -> None:
-        for button in self._buttons + self._strip_buttons:
+        for button in self._buttons:
             payload = getattr(button, "_payload", None)
             if payload is not None and str(payload) == key:
                 button.setIcon(icon)
 
     # ------------------------------------------------------------------
-    # 分页行
+    # 收纳内容（不再显示，只作为「＋ → 从收纳内容里选…」的候选）
     # ------------------------------------------------------------------
     def set_items(self, items: "list[engine.RepoItem]") -> None:
-        """设置分页行要显示的内容（收纳目录内容 + 系统位置）。"""
-        self._strip_items = list(items)
-        if self._strip_page >= self.strip_pages():
-            self._strip_page = max(0, self.strip_pages() - 1)
-        self.rebuild_strip()
+        """记下收纳目录里的内容，供「＋ 添加」时挑选。
 
-    def strip_pages(self) -> int:
-        total = len(self._strip_items)
-        return max(1, (total + STRIP_PAGE_SIZE - 1) // STRIP_PAGE_SIZE)
-
-    def goto_strip_page(self, index: int) -> None:
-        index = max(0, min(index, self.strip_pages() - 1))
-        if index != self._strip_page:
-            self._strip_page = index
-            self.rebuild_strip()
-
-    def rebuild_strip(self) -> None:
-        self._clear_strip()
-        start = self._strip_page * STRIP_PAGE_SIZE
-        page = self._strip_items[start:start + STRIP_PAGE_SIZE]
-
-        for item in page:
-            button = DockIcon(STRIP_ICON, show_text=True, parent=self.strip_host)
-            button.setText(DockIcon.elide(item.name))
-            button.setToolTip(f"{item.name}\n{item.path}")
-            button._payload = item.path                # noqa: SLF001
-            # 缓存里有就直接用；没有才贴占位、排队去取。
-            # 这样来回翻页时图标不会因为"重新去取但失败"而变空。
-            cached_icon = self.loader.cached(str(item.path))
-            if cached_icon is not None:
-                button.setIcon(cached_icon)
-            else:
-                button.setIcon(QIcon(letter_pixmap(
-                    item.name, PLACEHOLDER_COLORS.get(item.kind, "#94A3B8"),
-                    STRIP_ICON)))
-            button.activated.connect(lambda btn, it=item: self._open_item(it))
-            button.context_requested.connect(
-                lambda _btn, it=item: self._strip_menu(it))
-            self.strip_row.addWidget(button)
-            self._strip_buttons.append(button)
-
-        if not page:
-            placeholder = QLabel("这里还空着 —— 点左边「桌面整理」看看", self.strip_host)
-            placeholder.setObjectName("DockEmpty")
-            self.strip_row.addWidget(placeholder)
-        self.strip_row.addStretch(1)
-
-        pages = self.strip_pages()
-        self.strip_page_label.setText(f"{self._strip_page + 1}/{pages}")
-        self.btn_strip_prev.setEnabled(self._strip_page > 0)
-        self.btn_strip_next.setEnabled(self._strip_page < pages - 1)
-        self._queue_icons()
-        self.refit()
-
-    def _open_item(self, item: "engine.RepoItem") -> None:
-        if item.kind == "shortcut" and nest.shell_path_for(item.path):
-            ok, reason = nest.open_system_link(item.path)
-        else:
-            ok, reason = engine.launch(item.path)
-        if not ok:
-            self.setToolTip(f"{item.name}：{reason}")
-            QTimer.singleShot(4000, lambda: self.setToolTip(""))
-
-    def _strip_menu(self, item: "engine.RepoItem") -> None:
-        menu = QMenu(self)
-        action_open = menu.addAction("打开")
-        action_add = menu.addAction("从常用启动移除"
-                                    if self.cfg.is_quick(item.path) else "加为常用启动")
-        action_restore = menu.addAction("还原到桌面")
-        menu.addSeparator()
-        action_panel = menu.addAction("在面板里查看")
-        chosen = menu.exec(self.cursor().pos())
-        if chosen is None:
-            return
-        if chosen is action_open:
-            self._open_item(item)
-        elif chosen is action_add:
-            if self.cfg.is_quick(item.path):
-                self.cfg.remove_quick(item.path)
-            else:
-                self.cfg.add_quick(item.path,
-                                   item.path.stem if item.path.suffix else item.name)
-            self.quick_changed.emit()
-            self.rebuild()
-        elif chosen is action_restore:
-            ok, reason = nest.restore_item_to_desktop(self.cfg.desktop, item)
-            if ok:
-                self.request_refresh.emit()
-            else:
-                self.setToolTip(f"还原失败：{reason}")
-        elif chosen is action_panel:
-            self.open_desktop_files.emit()
+        菜单栏上**不再**渲染这排分页条目——分页浏览全部在收纳面板里完成。
+        """
+        self._items = list(items)
 
     # ------------------------------------------------------------------
     # 交互
@@ -693,10 +513,14 @@ class DockBar(QWidget):
                     self.rebuild()
             return
         if chosen is action_from_list:
-            items = self._strip_items
+            items = self._items
             if not items:
                 return
-            names = [i.name for i in items]
+            show_ext = bool(self.cfg.get("show_extensions", False))
+            names = [engine.display_name(i.name, i.is_dir, show_ext) for i in items]
+            if len(set(names)) != len(names):
+                # 剥掉后缀后重名了（报告.docx / 报告.txt）→ 退回完整名，别让人选错
+                names = [i.name for i in items]
             name, ok = QInputDialog.getItem(self, "加为常用", "选择要固定的项目：",
                                             names, 0, False)
             if ok and name:
@@ -799,9 +623,6 @@ class DockBar(QWidget):
         action_restore_all = menu.addAction("全部还原到桌面")
         menu.addSeparator()
 
-        action_strip = menu.addAction("收起分页行" if self.strip_visible() else "展开分页行")
-        menu.addSeparator()
-
         size_menu = menu.addMenu("图标大小")
         for size in DOCK_ICON_SIZES:
             action = size_menu.addAction(f"{size} 像素")
@@ -826,8 +647,6 @@ class DockBar(QWidget):
             return
         if chosen is action_files:
             self.open_desktop_files.emit()
-        elif chosen is action_strip:
-            self.toggle_strip()
         elif chosen is action_restore_all:
             self.request_refresh.emit()
         elif chosen is action_panel:

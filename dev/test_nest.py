@@ -9,8 +9,10 @@
 * 文件夹整体搬走（不拆内层）
 * 系统位置快捷方式（此电脑 / 回收站）被创建、能被识别、能打开
 * 退出还原：收纳目录 → 桌面，原样回来
-* 分页：Dock 分页行 / 收纳面板的翻页与边界
+* 分页：收纳面板的翻页与边界（菜单栏上那排分页条目已经移除）
 * 搜索：模糊匹配、命中收拢到一页
+* 显示文件后缀名开关：只改界面文字、不动磁盘文件、搜索两种写法都命中
+* 打开 / 反复翻页收纳面板时，底部 Dock 不会无故消失
 * 图标 + 下方名称的显示方式
 * 整个程序能一起构造、启动即收纳、退出即还原
 
@@ -37,6 +39,17 @@ PASS, FAIL = [], []
 def check(label: str, condition: bool, detail: str = "") -> None:
     (PASS if condition else FAIL).append(label)
     print(f"  {'✓' if condition else '✗'} {label}" + (f"  [{detail}]" if detail and not condition else ""))
+
+
+def _settings_flag(cfg) -> bool:
+    """设置窗口里的「显示文件后缀名」开关读到的值。"""
+    from settings import SettingsDialog
+
+    dialog = SettingsDialog(cfg, None, dark=False)
+    try:
+        return bool(dialog.chk_extensions.isChecked())
+    finally:
+        dialog.deleteLater()
 
 
 def build_sandbox():
@@ -250,8 +263,8 @@ def main() -> int:
     check("清空搜索恢复 42 项", len(browser._matches) == 42, str(len(browser._matches)))
 
     print()
-    print("── 6. Dock：第一个控件 + 内嵌分页行 ──")
-    from dock import DockBar, STRIP_PAGE_SIZE
+    print("── 6. Dock：第一个控件 + 主行（分页行已移除）──")
+    from dock import DockBar
 
     dock = DockBar(cfg)
     dock.set_items(items)
@@ -260,24 +273,25 @@ def main() -> int:
 
     check("Dock 构造成功", dock.isVisible())
     check("第一个控件是「桌面整理」", hasattr(dock, "desktop_btn"))
-    check("分页行每页 7 个", dock._strip_buttons and len(dock._strip_buttons) == STRIP_PAGE_SIZE,
-          str(len(dock._strip_buttons)))
-    check("分页数 = ceil(42/7) = 6", dock.strip_pages() == 6, str(dock.strip_pages()))
-    check("页码显示 1/6", dock.strip_page_label.text() == "1/6", dock.strip_page_label.text())
-    check("首页禁用上一页", not dock.btn_strip_prev.isEnabled())
-    check("分页行按钮带名称",
-          all(b.text() for b in dock._strip_buttons),
-          str([b.text() for b in dock._strip_buttons]))
-    check("分页行按钮有图标",
-          all(not b.icon().isNull() for b in dock._strip_buttons))
-
-    dock.goto_strip_page(5)
-    app.processEvents()
-    check("翻到末页页码正确", dock.strip_page_label.text() == "6/6",
-          dock.strip_page_label.text())
-    check("末页禁用下一页", not dock.btn_strip_next.isEnabled())
-    dock.goto_strip_page(99)
-    check("越界夹到末页", dock.strip_page_label.text() == "6/6")
+    # 需求：菜单栏上方那排分页条目整行删掉，分页浏览全部搬进收纳面板
+    check("菜单栏上不再有分页行 UI",
+          not hasattr(dock, "strip_panel")
+          and not hasattr(dock, "strip_row")
+          and not hasattr(dock, "strip_page_label")
+          and not hasattr(dock, "btn_toggle_strip"),
+          str([a for a in ("strip_panel", "strip_row", "strip_page_label",
+                           "btn_toggle_strip") if hasattr(dock, a)]))
+    check("菜单栏不再持有分页按钮", not hasattr(dock, "_strip_buttons"))
+    check("不再有分页相关方法",
+          not hasattr(dock, "rebuild_strip") and not hasattr(dock, "strip_pages")
+          and not hasattr(dock, "toggle_strip"))
+    check("配置里也没有分页行开关了", "dock_strip_visible" not in config_mod.DEFAULTS)
+    check("收纳内容仍保留为「＋ 添加」的候选",
+          len(dock._items) == len(items), f"{len(dock._items)} vs {len(items)}")
+    check("主行控件齐全：＋ / ⚙ / ✕",
+          hasattr(dock, "add_btn") and hasattr(dock, "settings_btn")
+          and hasattr(dock, "btn_hide_dock"))
+    check("常用启动行还在", dock.desktop_btn.isVisible())
 
     fired = []
     toggled = []
@@ -295,20 +309,9 @@ def main() -> int:
           f"{dock.y() + dock.height()} vs {dock.screen().availableGeometry().bottom()}")
 
     print()
-    print("── 6b. Dock 上的两个开关按钮 ──")
-    check("有「收起/展开分页行」按钮", hasattr(dock, "btn_toggle_strip"))
+    print("── 6b. Dock 上的控制按钮 ──")
     check("有「隐藏整条菜单栏」按钮", hasattr(dock, "btn_hide_dock"))
-    check("分页行默认展开", dock.strip_panel.isVisible())
-    dock.toggle_strip()
-    app.processEvents()
-    check("点一下能收起分页行", not dock.strip_panel.isVisible()
-          and not cfg.get("dock_strip_visible"))
-    check("按钮文案变成展开", dock.btn_toggle_strip.text() == "▲",
-          dock.btn_toggle_strip.text())
-    check("收起后常用启动行还在", dock.desktop_btn.isVisible())
-    dock.toggle_strip()
-    app.processEvents()
-    check("再点能展开", dock.strip_panel.isVisible() and cfg.get("dock_strip_visible"))
+    check("有「设置」按钮", hasattr(dock, "settings_btn"))
 
     hidden_signals = []
     dock.hide_requested.connect(lambda: hidden_signals.append(True))
@@ -367,14 +370,171 @@ def main() -> int:
     check("启动后桌面被自动收纳", not list(desktop.iterdir()),
           str(sorted(p.name for p in desktop.iterdir())))
     check("面板里能看到内容", len(tray.nest_items) > 0, str(len(tray.nest_items)))
-    check("Dock 分页行已同步", len(tray.dock._strip_items) == len(tray.nest_items),
-          f"{len(tray.dock._strip_items)} vs {len(tray.nest_items)}")
+    check("Dock 已同步收纳内容（供「＋ 添加」挑选）",
+          len(tray.dock._items) == len(tray.nest_items),
+          f"{len(tray.dock._items)} vs {len(tray.nest_items)}")
+    check("菜单栏上依然没有分页行",
+          not hasattr(tray.dock, "strip_panel"))
+    check("收纳面板能拿到同一批内容",
+          len(tray.desktop_browser._items) == len(tray.nest_items))
 
     tray._quitting = True
     tray.restore_desktop_on_exit()
     check("退出后桌面被自动还原", len(list(desktop.iterdir())) > 0,
           str(len(list(desktop.iterdir()))))
     check("退出后收纳目录已空", not list(store.iterdir()))
+
+    print()
+    print("── 9. 显示文件后缀名开关 ──")
+    from engine import RepoItem, display_name
+
+    check("默认不显示后缀", cfg.get("show_extensions") is False)
+    check("显示名默认剥掉后缀", display_name("报告.docx", False, False) == "报告",
+          display_name("报告.docx", False, False))
+    check("开关打开时保留后缀", display_name("报告.docx", False, True) == "报告.docx")
+    check("文件夹不受影响（v1.2 不会被切）",
+          display_name("v1.2", True, False) == "v1.2")
+    check("本来就无后缀的原样返回", display_name("说明", False, False) == "说明")
+    check("点开头的文件不返回空串",
+          display_name(".gitignore", False, False) == ".gitignore",
+          display_name(".gitignore", False, False))
+
+    # 造几个真实文件：验证"只改显示、绝不动磁盘"
+    ext_dir = base / "ext"
+    ext_dir.mkdir(exist_ok=True)
+    (ext_dir / "报告.docx").write_text("x", encoding="utf-8")
+    (ext_dir / "资料夹").mkdir(exist_ok=True)
+    sample_items = [
+        RepoItem(ext_dir / "报告.docx", "报告.docx", False, "document", 1, 0.0),
+        RepoItem(ext_dir / "资料夹", "资料夹", True, "folder", 0, 0.0),
+    ]
+
+    browser = tray.desktop_browser
+    browser.apply_theme(True)
+    browser.set_items(sample_items)
+    browser.search.clear()
+    browser._rebuild()
+    app.processEvents()
+
+    def tile_labels():
+        return [t.name_label.text() for t in browser._tiles]
+
+    check("关闭时收纳面板不显示后缀", tile_labels() == ["报告", "资料夹"],
+          str(tile_labels()))
+
+    tray.panel.chk_extensions.setChecked(True)      # 从主面板的开关打开
+    app.processEvents()
+    check("打开时收纳面板显示完整后缀",
+          tile_labels() == ["报告.docx", "资料夹"], str(tile_labels()))
+    check("开关写进配置（重启能保持）", cfg.get("show_extensions") is True)
+    check("设置窗口读到同一个值",
+          _settings_flag(cfg) is True, str(_settings_flag(cfg)))
+
+    # 搜索：带后缀 / 不带后缀都要命中
+    for query in ("报告", "报告.docx"):
+        browser.search.setText(query)
+        names = [i.name for i in browser._filtered()]
+        check(f"搜「{query}」都能命中 报告.docx", names == ["报告.docx"], str(names))
+    browser.search.clear()
+    browser._rebuild()
+
+    tray.panel.update_overview(items=sample_items, nest_items=2, desktop_pending=0,
+                               folders=1, shortcuts=0, history=[])
+    tree = [tray.panel.items_tree.topLevelItem(i).text(0)
+            for i in range(tray.panel.items_tree.topLevelItemCount())]
+    check("主面板列表也跟着显示后缀", tree == ["报告.docx", "资料夹"], str(tree))
+
+    check("磁盘上的真实文件名没被动过",
+          (ext_dir / "报告.docx").is_file() and not (ext_dir / "报告").exists())
+
+    tray.panel.chk_extensions.setChecked(False)
+    app.processEvents()
+    check("关回去之后配置也关掉", cfg.get("show_extensions") is False)
+    check("关回去之后显示也恢复", tile_labels() == ["报告", "资料夹"], str(tile_labels()))
+    check("磁盘文件依然完好", (ext_dir / "报告.docx").is_file())
+
+    print()
+    print("── 10. 打开 / 翻页收纳面板时 Dock 不会消失 ──")
+    tray.cfg.set("dock_hidden_by_user", False)
+    tray.cfg.set("dock_visible", True)
+    tray.cfg.set("dock_auto_show", True)
+    tray.dock.show_bar()
+    app.processEvents()
+
+    # 造多页内容，翻页才有意义
+    page_dir = base / "page"
+    page_dir.mkdir(exist_ok=True)
+    page_items = []
+    for index in range(42):
+        p = page_dir / f"翻页{index:02d}.txt"
+        p.write_text("p", encoding="utf-8")
+        page_items.append(RepoItem(p, p.name, False, "document", 1, 0.0))
+    browser.set_items(page_items)
+    browser.set_per_page(14)
+    app.processEvents()
+    check("面板里有多页可翻", browser._page_count() == 3, str(browser._page_count()))
+
+    check("Dock 初始可见", tray.dock.isVisible())
+    check("面板关着时 _dock_in_use 为假", tray._dock_in_use() is False)
+
+    browser.reposition()
+    browser.show()
+    app.processEvents()
+    check("收纳面板已打开", browser.isVisible())
+    check("面板打开时 _dock_in_use 为真", tray._dock_in_use() is True)
+
+    # 关键：把自己窗口当成"前台窗口"，绝不能被判成"别的程序在遮挡菜单栏"
+    real_hwnd = tray._foreground_hwnd
+    try:
+        tray._foreground_hwnd = lambda: int(browser.winId())
+        check("前台窗口是自己时被识别出来", tray._foreground_is_self() is True)
+        check("自己的面板不算「全屏遮挡」",
+              tray._foreground_is_fullscreen() is False)
+        tray._foreground_hwnd = lambda: int(tray.dock.winId())
+        check("Dock 自己也不算「全屏遮挡」",
+              tray._foreground_is_fullscreen() is False)
+    finally:
+        tray._foreground_hwnd = real_hwnd
+
+    # 反复翻页 / 换每页数量 / 触发自动显隐检查，菜单栏必须一直在
+    survived = True
+    for _round in range(3):
+        for page in range(browser._page_count()):
+            browser.goto_page(page)
+            tray._auto_show_tick()
+            app.processEvents()
+            if not tray.dock.isVisible():
+                survived = False
+        browser.set_per_page(21)
+        app.processEvents()
+        browser.set_per_page(14)
+        app.processEvents()
+        if not tray.dock.isVisible():
+            survived = False
+    check("反复翻页切换后 Dock 依然稳定可见", survived and tray.dock.isVisible())
+    check("翻页没有篡改菜单栏「显示/隐藏」状态变量",
+          bool(tray.cfg.get("dock_visible", True)) is True
+          and bool(tray.cfg.get("dock_hidden_by_user", False)) is False,
+          f"visible={tray.cfg.get('dock_visible')} "
+          f"by_user={tray.cfg.get('dock_hidden_by_user')}")
+
+    # 用户手动点 ✕ 隐藏：必须保持隐藏，自动逻辑不许把它弹回来
+    tray.dock.hide_self()
+    app.processEvents()
+    for _ in range(3):
+        tray._auto_show_tick()
+        app.processEvents()
+    check("用户手动隐藏后保持隐藏（不自动恢复）", not tray.dock.isVisible())
+    check("手动隐藏标记被记住",
+          bool(tray.cfg.get("dock_hidden_by_user", False)) is True)
+    tray.cfg.set("dock_hidden_by_user", False)
+    tray.cfg.set("dock_visible", True)
+    tray.dock.show_bar()
+    app.processEvents()
+    check("清掉手动标记后可以再显示", tray.dock.isVisible())
+
+    browser.hide()
+    app.processEvents()
 
     if shots:
         out = HERE / "shots"
@@ -386,14 +546,18 @@ def main() -> int:
         tray.dock.show_bar()
         app.processEvents()
         time.sleep(0.3)
-        tray.dock.grab().save(str(out / "dock.png"))
+        # 注意：离屏平台截不到 DWM 的磨砂（模糊发生在合成阶段），
+        # 所以这两个文件名带 offscreen 前缀，**不要**覆盖 README 用的
+        # shots/dock.png 和 shots/popup-glass.png——那两张得用
+        # dev/shot_panel.py 在真机上重拍。
+        tray.dock.grab().save(str(out / "offscreen-dock.png"))
         tray.desktop_browser.resize(920, 620)
         tray.desktop_browser.show_window()
         for _ in range(60):
             app.processEvents()
             time.sleep(0.03)
-        tray.desktop_browser.grab().save(str(out / "panel.png"))
-        print(f"  截图已保存到 {out}")
+        tray.desktop_browser.grab().save(str(out / "offscreen-panel.png"))
+        print(f"  截图已保存到 {out}（离屏渲染，无磨砂模糊）")
 
     print()
     print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")

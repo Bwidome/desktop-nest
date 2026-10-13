@@ -21,6 +21,17 @@
 * 实时模糊搜索，结果自动收拢
 * 文件夹整体显示，双击在资源管理器里打开
 * 系统位置（此电脑 / 回收站）也在这里，双击直接打开
+
+外观：**贴底上滑的磨砂玻璃浮层**
+--------------------------------
+不是普通应用窗口，也不是白色矩形弹窗——它是从底部菜单栏上方"拉"出来的一块
+**半透明深色磨砂玻璃**浮层（大圆角），和主面板共用同一套外观：
+
+* 顶层窗口设 `WA_TranslucentBackground`，深色只画在内部的 `#Popup` 上；
+* 真正的模糊由 DWM 提供（见 `acrylic.py`），窗口再按圆角裁一刀；
+* 磨砂 + 圆角 + 深色调色板的公共逻辑在 `widgets.GlassCardMixin` 里。
+
+关闭方式：`Esc`、点 ✕、再点一次 Dock 的「桌面整理」或托盘左键。
 """
 
 from __future__ import annotations
@@ -37,8 +48,8 @@ import engine
 import nest
 import theme as theme_mod
 from textutil import fuzzy_match
-from widgets import (IconLoader, PLACEHOLDER_COLORS, app_icon, icon_hint_for,
-                      letter_pixmap, pixmap_for)
+from widgets import (GlassCardMixin, IconLoader, PLACEHOLDER_COLORS, app_icon,
+                     icon_hint_for, letter_pixmap, pixmap_for)
 
 GRID_ICON = 48
 ICON_REQUEST = 64              # 向 Windows 要更大的图标再缩，清晰得多
@@ -47,6 +58,9 @@ CELL_H = 110
 DEFAULT_PER_PAGE = 28          # 7 列 × 4 行
 PAGE_SIZE_CHOICES = [14, 21, 28, 35, 42]
 APP_ICON = 34
+# 贴底时默认给底部菜单栏让开的高度。主程序会用 Dock 的**真实高度**覆盖它
+# （见 `set_bottom_reserve`）——写死一个值的话，菜单栏一变高，面板就会压在它身上。
+DEFAULT_BOTTOM_RESERVE = 84
 
 
 class ItemTile(QFrame):
@@ -56,7 +70,8 @@ class ItemTile(QFrame):
     double_clicked = Signal(object)
     context_requested = Signal(object, object)
 
-    def __init__(self, item: "engine.RepoItem", palette: dict, parent=None):
+    def __init__(self, item: "engine.RepoItem", palette: dict,
+                 show_extensions: bool = False, parent=None):
         super().__init__(parent)
         self.item = item
         self.p = palette
@@ -64,6 +79,8 @@ class ItemTile(QFrame):
         self.setObjectName("FileTile")
         self.setFixedSize(CELL_W - 8, CELL_H - 8)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        display = engine.display_name(item.name, item.is_dir, show_extensions)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 9, 6, 7)
@@ -73,11 +90,11 @@ class ItemTile(QFrame):
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.icon_label.setFixedHeight(GRID_ICON + 4)
         self.icon_label.setPixmap(
-            letter_pixmap(item.name, PLACEHOLDER_COLORS.get(item.kind, "#94A3B8"),
+            letter_pixmap(display, PLACEHOLDER_COLORS.get(item.kind, "#94A3B8"),
                           GRID_ICON))
         layout.addWidget(self.icon_label)
 
-        self.name_label = QLabel(item.name)
+        self.name_label = QLabel(display)
         self.name_label.setObjectName("TileName")
         self.name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter |
                                      Qt.AlignmentFlag.AlignTop)
@@ -127,7 +144,8 @@ class AppButton(QToolButton):
     activated = Signal(object)
     context_requested = Signal(object, object)
 
-    def __init__(self, name: str, path: Path, palette: dict, parent=None):
+    def __init__(self, name: str, path: Path, palette: dict, parent=None,
+                 show_extensions: bool = False):
         super().__init__(parent)
         self.app_name = name
         self.path = path
@@ -136,8 +154,10 @@ class AppButton(QToolButton):
         self.setIconSize(QSize(APP_ICON, APP_ICON))
         self.setFixedSize(78, 66)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip(f"{name}\n{path}")
-        self.setText(self._elide(name))
+        # 显示名统一按"真实文件名 + 后缀开关"算，配置里存的 name 可能是不带后缀的
+        display = engine.display_name(path.name or name, False, show_extensions)
+        self.setToolTip(f"{display}\n{path}")
+        self.setText(self._elide(display))
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(
             lambda pos: self.context_requested.emit(self, self.mapToGlobal(pos)))
@@ -154,7 +174,7 @@ class AppButton(QToolButton):
         super().mouseReleaseEvent(event)
 
 
-class DesktopBrowser(QWidget):
+class DesktopBrowser(GlassCardMixin, QWidget):
     """桌面收纳面板。"""
 
     request_refresh = Signal()
@@ -162,11 +182,16 @@ class DesktopBrowser(QWidget):
     request_settings = Signal()
     request_restore_all = Signal()
 
+    # 悬浮磨砂玻璃浮层：磨砂 + 圆角裁剪 + 深色调色板都在 GlassCardMixin 里。
+    # 收纳面板**固定深色**（不管应用主题），所以 self.dark 恒为 True。
+    _glass_card_sel = "#Popup"
+    _glass_log_name = "收纳面板"
+
     def __init__(self, cfg, parent=None):
         super().__init__(parent)
         self.cfg = cfg
-        self.dark = bool(cfg.get("dark"))
-        self.p = theme_mod.palette(self.dark)
+        self.dark = True
+        self.p = theme_mod.glass_palette()
 
         self._items: "list[engine.RepoItem]" = []
         self._matches: "list[engine.RepoItem]" = []
@@ -175,6 +200,8 @@ class DesktopBrowser(QWidget):
         self._page = 0
         self._per_page = int(cfg.get("page_size", DEFAULT_PER_PAGE) or DEFAULT_PER_PAGE)
         self._selected: "engine.RepoItem | None" = None
+        # 贴底时给底部菜单栏让开多少高度（由主程序注入 Dock 的真实高度）
+        self._reserve_provider = None
 
         # 这是一个**上拉菜单**，不是应用窗口：
         # * Tool —— 不进任务栏、不进 Alt+Tab，和弹出菜单一个待遇
@@ -185,9 +212,11 @@ class DesktopBrowser(QWidget):
                             Qt.WindowType.Tool |
                             Qt.WindowType.NoDropShadowWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setObjectName("BrowserRoot")     # 顶层窗口自己不画底，见 theme.glass_block
         self.setWindowTitle("桌面收纳 · 收纳面板")
         self.setWindowIcon(app_icon())          # 左上角/任务栏要有个像样的图标
         self.setMinimumSize(560, 360)
+        self._glass_init()
 
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
@@ -208,6 +237,7 @@ class DesktopBrowser(QWidget):
         self.loader.ready.connect(self._on_icon_ready)
 
         self._build_ui()
+        self._apply_glass_palette()
         self._restore_geometry()
 
     # ------------------------------------------------------------------
@@ -343,16 +373,33 @@ class DesktopBrowser(QWidget):
 
         self.apply_theme(self.dark)
 
-    def apply_theme(self, dark: bool) -> None:
-        self.dark = dark
-        self.p = theme_mod.palette(dark)
-        self.setStyleSheet(theme_mod.stylesheet(dark))
+    def apply_theme(self, dark: bool = True) -> None:
+        # 收纳面板固定深色磨砂玻璃（需求如此），不受应用明暗主题影响；
+        # 保留参数是为了和调用方（tray_app）的接口保持一致。
+        self.dark = True
+        self.p = theme_mod.glass_palette()
+        self._restyle()
         for tile in self._tiles:
             tile.p = self.p
             tile._apply_style()
         self._rebuild_apps()
         if self._tiles:
             self._render_page()
+
+    # ------------------------------------------------------------------
+    # 显示文件后缀名
+    # ------------------------------------------------------------------
+    def show_extensions(self) -> bool:
+        """当前是否显示文件后缀名（默认关闭）。"""
+        return bool(self.cfg.get("show_extensions", False))
+
+    def apply_extensions(self) -> None:
+        """后缀开关变了：重画常用启动 + 当前页。
+
+        只改显示文本；`ItemTile.item` / `AppButton.path` 指向的真实文件不动。
+        """
+        self._rebuild_apps()
+        self._render_page()
 
     # ------------------------------------------------------------------
     # 数据
@@ -379,7 +426,8 @@ class DesktopBrowser(QWidget):
         for entry in self.cfg.quick_items:
             path = Path(entry["path"])
             name = entry["name"] or path.name
-            button = AppButton(name, path, self.p, self.apps_host)
+            button = AppButton(name, path, self.p, self.apps_host,
+                               show_extensions=self.show_extensions())
             button.activated.connect(self._launch_app)
             button.context_requested.connect(self._app_menu)
             self.apps_row.addWidget(button)
@@ -450,7 +498,12 @@ class DesktopBrowser(QWidget):
         if chosen is action_here:
             if not self._items:
                 return
-            names = [i.name for i in self._items]
+            show_ext = self.show_extensions()
+            names = [engine.display_name(i.name, i.is_dir, show_ext)
+                     for i in self._items]
+            if len(set(names)) != len(names):
+                # 剥掉后缀后重名了（报告.docx / 报告.txt）→ 退回完整名，别让人选错
+                names = [i.name for i in self._items]
             name, ok = QInputDialog.getItem(self, "加为常用", "选择要固定的项目：",
                                             names, 0, False)
             if ok and name:
@@ -465,10 +518,16 @@ class DesktopBrowser(QWidget):
         query = self.search.text().strip()
         if not query:
             return list(self._items)
+        query_low = query.lower()
         out = []
         for item in self._items:
             hit, _index, _score = fuzzy_match(query, item.name)
-            if not hit and item.suffix and query.lower() in item.suffix:
+            if not hit:
+                # 不带后缀的名字也要能命中：搜「报告」要能找到「报告.docx」。
+                # 两种写法都试一遍，跟界面上显示不显示后缀无关。
+                hit, _index, _score = fuzzy_match(
+                    query, engine.display_name(item.name, item.is_dir, False))
+            if not hit and item.suffix and query_low in item.suffix:
                 hit = True
             if hit:
                 out.append(item)
@@ -507,7 +566,7 @@ class DesktopBrowser(QWidget):
         columns = max(1, self._per_page // 4)
 
         for index, item in enumerate(page_items):
-            tile = ItemTile(item, self.p, self.grid_host)
+            tile = ItemTile(item, self.p, self.show_extensions(), self.grid_host)
             tile.activated.connect(self.select_item)
             tile.double_clicked.connect(self._on_double_click)
             tile.context_requested.connect(self._show_tile_menu)
@@ -737,6 +796,23 @@ class DesktopBrowser(QWidget):
         else:
             self.show_window()
 
+    def set_bottom_reserve(self, provider) -> None:
+        """注册一个回调，返回"贴底时要让开的高度"。
+
+        面板是"坐在"底部菜单栏上方向下滑出来的浮层，所以底边必须正好落在
+        菜单栏顶边之上。菜单栏高度会变（图标大小、常用项换行…），写死一个数字
+        迟早会被压住，所以交给主程序实时提供。
+        """
+        self._reserve_provider = provider
+
+    def _bottom_reserve(self) -> int:
+        if self._reserve_provider is not None:
+            try:
+                return max(0, int(self._reserve_provider()))
+            except Exception:
+                pass
+        return DEFAULT_BOTTOM_RESERVE
+
     def reposition(self) -> None:
         """贴到屏幕底部正中、底部菜单栏上方。
 
@@ -744,8 +820,9 @@ class DesktopBrowser(QWidget):
         （屏幕小或面板大时先压缩尺寸，再夹住坐标）。
         """
         screen = self.screen().availableGeometry()
+        reserve = self._bottom_reserve()
         max_width = max(560, screen.width() - 60)
-        max_height = max(320, screen.height() - 140)
+        max_height = max(320, screen.height() - reserve - 40)
         width = min(self.width(), max_width)
         height = min(self.height(), max_height)
         if (width, height) != (self.width(), self.height()):
@@ -754,7 +831,7 @@ class DesktopBrowser(QWidget):
         x = screen.center().x() - width // 2
         x = max(screen.left() + 12, min(x, screen.right() - width - 12))
         # 给底部菜单栏留出空间，面板正好"坐在"它上面
-        y = screen.bottom() - height - 84
+        y = screen.bottom() - height - reserve
         y = max(screen.top() + 12, y)
         self.move(x, y)
 

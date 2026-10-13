@@ -5,6 +5,7 @@
 ============
 * IconLoader —— 分片取图标，界面不卡
 * 图标占位色 —— 取不到真实图标时用的圆角色块
+* GlassCardMixin —— 「悬浮磨砂玻璃卡片」外观（主面板 / 收纳面板共用）
 """
 
 from __future__ import annotations
@@ -12,10 +13,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from qt_compat import (
-    QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPixmap, QRect, Qt,
-    QTimer, QWidget, Signal,
+    QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPalette, QPixmap,
+    QRect, Qt, QTimer, QWidget, Signal,
 )
 
+import acrylic
+import config
 import engine
 import icons
 import theme
@@ -240,3 +243,100 @@ class IconLoader(QWidget):
 
     def cached_count(self) -> int:
         return len(self._cache)
+
+
+class GlassCardMixin:
+    """「悬浮磨砂玻璃卡片」外观：主面板 / 收纳面板共用。
+
+    做三件事：
+    1. 把窗口调色板换成深色——QSS 只覆盖写到的控件，没写到的（QTabBar 的空白、
+       表头间隙、滚动条槽…）会回落到**系统调色板**，那是浅色的，在深色玻璃上
+       就是一块刺眼的白；
+    2. 窗口第一次显示时调 `acrylic.enable_blur` 开 DWM 磨砂（真正把背后的桌面
+       模糊掉这件事 Qt 做不到，只能交给 DWM）；
+    3. 尺寸变化时按圆角重新裁一次窗口区域——`SetWindowRgn` 不跟着窗口缩放，
+       不重裁的话模糊会糊到圆角外面，露出方角。
+
+    子类的约定（见 `panel.MainPanel` / `desktop_browser.DesktopBrowser`）：
+    * 顶层窗口设 `WA_TranslucentBackground`——窗口自身透明，深色只画在卡片子控件上
+      （**不能**给顶层窗口设 QSS 背景，那会把磨砂整块盖住）；
+    * `__init__` 里调一次 `self._glass_init()`；
+    * 覆盖 `_glass_card_sel`（卡片子控件的 objectName 选择器），磨砂不可用时
+      用它把底色加浓一档；
+    * 需要 `self.dark`（明暗主题标志）——收纳面板固定深色玻璃，传 True 即可。
+    """
+
+    # 子类覆盖：磨砂不可用时加浓底色的选择器
+    _glass_card_sel = "#MainCard"
+    # 子类覆盖：日志里对这张卡片的称呼
+    _glass_log_name = "玻璃卡片"
+
+    def _glass_init(self) -> None:
+        """初始化磨砂状态。子类 `__init__` 里调一次。"""
+        self._glass_mode = ""
+        self._glass_ready = False
+
+    # ------------------------------------------------------------------
+    # 调色板
+    # ------------------------------------------------------------------
+    def _apply_glass_palette(self) -> None:
+        """把窗口调色板换成深色，兜住 QSS 没写到的控件。"""
+        roles = theme.glass_palette_roles()
+        pal = self.palette()
+        mapping = {
+            QPalette.ColorRole.Window: roles["window"],
+            QPalette.ColorRole.WindowText: roles["text"],
+            QPalette.ColorRole.Base: roles["base"],
+            QPalette.ColorRole.AlternateBase: roles["alternate"],
+            QPalette.ColorRole.Text: roles["text"],
+            QPalette.ColorRole.Button: roles["button"],
+            QPalette.ColorRole.ButtonText: roles["text"],
+            QPalette.ColorRole.ToolTipBase: roles["button"],
+            QPalette.ColorRole.ToolTipText: roles["text"],
+            QPalette.ColorRole.Highlight: roles["highlight"],
+            QPalette.ColorRole.HighlightedText: roles["highlight_text"],
+            QPalette.ColorRole.PlaceholderText: roles["sub"],
+        }
+        for role, value in mapping.items():
+            pal.setColor(role, QColor(value))
+        self.setPalette(pal)
+
+    # ------------------------------------------------------------------
+    # 样式表
+    # ------------------------------------------------------------------
+    def _restyle(self) -> None:
+        """套用玻璃卡片样式。
+
+        拿不到磨砂（老系统 / 被策略挡住）时把卡片底色加浓一档——
+        没有模糊还那么透，文字会看不清。
+        """
+        sheet = theme.stylesheet(bool(getattr(self, "dark", False)), glass=True)
+        if not self._glass_mode:
+            sheet += f"\n{self._glass_card_sel} {{ {theme.GLASS_FALLBACK} }}\n"
+        self.setStyleSheet(sheet)
+
+    # ------------------------------------------------------------------
+    # DWM 磨砂 + 圆角裁剪
+    # ------------------------------------------------------------------
+    def _ensure_glass(self) -> None:
+        """开磨砂（只在第一次显示时做一次）。"""
+        if self._glass_ready:
+            return
+        self._glass_ready = True
+        self._glass_mode = acrylic.enable_blur(
+            self, radius=theme.GLASS_RADIUS,
+            tint=theme.GLASS_TINT, opacity=theme.GLASS_TINT_ALPHA)
+        config.log(f"{self._glass_log_name}磨砂："
+                   f"{self._glass_mode or '不可用，退回纯半透明'}"
+                   f"（{acrylic.describe()}）")
+        self._restyle()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._ensure_glass()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        # SetWindowRgn 不会跟着窗口缩放，尺寸一变就得重新裁一次
+        if self._glass_mode:
+            acrylic.apply_round_region(self, theme.GLASS_RADIUS)
