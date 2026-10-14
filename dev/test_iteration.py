@@ -1,0 +1,451 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+本轮迭代的回归测试
+=================
+覆盖用户报的 3 组 BUG + 1 组新功能：
+
+BUG1  右键「常见应用」崩溃 / 崩溃要能自动还原桌面
+BUG2  常用软件图标、增删后 UI 同步、不留空白
+BUG3  Dock 只对最大化/全屏避让，普通窗口与桌面空闲不隐藏、不闪烁
+功能4 复选框多选批量添加 + 新增删除按钮多选批量删除
+
+用法：python dev/test_iteration.py
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE / "libs"))
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+# 看门狗：挂死时打印线程栈并强退，方便定位
+import faulthandler as _fh
+_fh.enable()
+_fh.dump_traceback_later(90, exit=True)
+
+PASS, FAIL = [], []
+
+
+def check(label: str, condition: bool, detail: str = "") -> None:
+    (PASS if condition else FAIL).append(label)
+    print(f"  {'✓' if condition else '✗'} {label}"
+          + (f"  [{detail}]" if detail and not condition else ""))
+
+
+def main() -> int:
+    base = Path(tempfile.gettempdir()) / "nest-iteration"
+    shutil.rmtree(base, ignore_errors=True)
+    desktop, public, cfg_dir = base / "Desktop", base / "Public", base / "cfg"
+    for folder in (desktop, public, cfg_dir):
+        folder.mkdir(parents=True)
+
+    import winlink
+
+    exes = [
+        r"C:\Windows\System32\notepad.exe",
+        r"C:\Windows\System32\calc.exe",
+        r"C:\Windows\explorer.exe",
+        r"C:\Windows\System32\write.exe",
+        r"C:\Windows\System32\mspaint.exe",
+    ]
+    for index, exe in enumerate(exes):
+        winlink.create_shortcut(desktop / f"软件{index}.lnk", exe)
+
+    from qt_compat import QApplication, QMenu, QMessageBox, QPoint
+
+    app = QApplication([])
+    import config as config_mod
+
+    cfg = config_mod.Config(cfg_dir)
+    cfg.update({"desktop": str(desktop), "panel_on_start": "never",
+                "auto_take_on_start": False})
+
+    import nest
+
+    nest.nest_root = lambda: base / ".nest"
+    config_mod.get_public_desktop_dir = lambda: public
+    config_mod.get_desktop_dir = lambda: desktop
+    QMessageBox.information = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Ok)
+    QMessageBox.warning = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Ok)
+    QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+
+    import tray_app
+
+    tray = tray_app.TrayApp(cfg, silent=True)
+    tray.install_crash_guards()
+    deadline = time.time() + 25
+    while tray._scan is not None and tray._scan.isRunning() and time.time() < deadline:
+        app.processEvents()
+        time.sleep(0.05)
+    for _ in range(40):
+        app.processEvents()
+        time.sleep(0.02)
+
+    browser = tray.desktop_browser
+    dock = tray.dock
+
+    def pump(seconds: float = 1.2) -> None:
+        end = time.time() + seconds
+        while time.time() < end:
+            app.processEvents()
+            time.sleep(0.02)
+
+    # 模拟用户点菜单项：不真的弹窗，直接返回指定 action
+    def click_menu_choice(choice_text: str):
+        original = QMenu.exec
+
+        def fake(self, *args, **kwargs):
+            for action in self.actions():
+                if action.text() == choice_text:
+                    return action
+            return None
+
+        QMenu.exec = fake
+        return original
+
+    def restore_menu(original) -> None:
+        QMenu.exec = original
+
+    # ==================================================================
+    print("── BUG1. 右键「常见应用」不再崩溃 ──")
+    # 准备几个常用项
+    from widgets import multi_pick
+
+    real_multi = multi_pick
+    added_keys = []
+    for index in range(3):
+        cfg.add_quick(desktop / f"软件{index}.lnk", f"软件{index}")
+    browser.rebuild_apps()
+    pump(0.6)
+    check("常用按钮已就位", len(browser._app_buttons) == 3,
+          str(len(browser._app_buttons)))
+
+    crashes = []
+    for button in list(browser._app_buttons):
+        original = click_menu_choice("打开")
+        try:
+            browser._app_menu(button, QPoint(50, 50))
+        except BaseException as exc:  # noqa: BLE001
+            crashes.append(f"{type(exc).__name__}: {exc}")
+        finally:
+            restore_menu(original)
+    check("面板常用项右键菜单不崩溃", not crashes, "; ".join(crashes[:3]))
+
+    # 关键：每次 rebuild 都会重建按钮对象，旧引用会变成"已从布局摘除"的死对象
+    # （isVisible 恒为 False），所以每轮都要重新取。
+    dock.rebuild()
+    pump(0.3)
+    dock_crashes = []
+    quick_entries = list(cfg.quick_items)
+    dock_buttons = [b for b in dock._buttons if getattr(b, "_payload", None)]
+    check("菜单栏上有常用项按钮", len(dock_buttons) >= 1, str(len(dock_buttons)))
+    for button in dock_buttons[:3]:
+        entry = next((e for e in quick_entries
+                      if str(e["path"]) == str(button._payload)), None)
+        if entry is None:
+            continue
+        original = click_menu_choice("打开")
+        try:
+            # 关键：第三个参数（位置）——旧代码这里参数不匹配会 TypeError
+            dock._quick_menu(button, entry, QPoint(50, 50))
+        except BaseException as exc:  # noqa: BLE001
+            dock_crashes.append(f"{type(exc).__name__}: {exc}")
+        finally:
+            restore_menu(original)
+    check("菜单栏常用项右键菜单不崩溃（含位置参数）",
+          not dock_crashes, "; ".join(dock_crashes[:3]))
+
+    # 位置参数也可以省略（用鼠标当前位置）
+    pos_optional = True
+    try:
+        original = click_menu_choice("打开")
+        dock._quick_menu(dock_buttons[0], quick_entries[0])
+    except BaseException as exc:  # noqa: BLE001
+        pos_optional = False
+        check("右键菜单位置参数可省略", False, f"{type(exc).__name__}: {exc}")
+    finally:
+        restore_menu(original)
+    if pos_optional:
+        check("右键菜单位置参数可省略", True)
+
+    # 菜单栏空白处右键（contextMenuEvent）
+    check("菜单栏有 contextMenuEvent 处理", hasattr(dock, "contextMenuEvent"))
+
+    print()
+    print("── BUG1. 崩溃时自动还原桌面（防数据丢失）──")
+    # 把桌面收进收纳目录，制造"收纳完成、还没还原"的窗口期
+    take = nest.take_from_desktop(cfg.desktop)
+    check("先把桌面收进收纳目录", take.moved >= 5, take.summary())
+    desktop_before = len(list(cfg.desktop.iterdir()))
+    check("桌面此刻是空的", desktop_before == 0, str(desktop_before))
+    nested = len(list(nest.desktop_store().iterdir()))
+    check("收纳目录里有东西", nested >= 5, str(nested))
+
+    # 触发未捕获异常 → 应自动还原
+    # 注意：测完必须把 excepthook 还原。否则后面任何未捕获异常（比如测试自己
+    # 抛的）都会再跑一遍应急还原，测试进程也会被带偏甚至卡住。
+    saved_hook = sys.excepthook
+    try:
+        raise RuntimeError("模拟：右键菜单炸了")
+    except RuntimeError:
+        sys.excepthook(*sys.exc_info())
+    finally:
+        sys.excepthook = saved_hook
+    pump(0.5)
+    after = sorted(p.name for p in cfg.desktop.iterdir())
+    left = (len(list(nest.desktop_store().iterdir()))
+            if nest.desktop_store().exists() else 0)
+    check("崩溃后桌面已自动还原", len(after) >= 5, str(len(after)))
+    check("崩溃后收纳目录已清空", left == 0, str(left))
+    check("还原回来的是原来的文件",
+          all(f"软件{i}.lnk" in after for i in range(5)), str(after))
+
+    print()
+    print("── BUG1. 应急还原的边界 ──")
+    check("应急还原是幂等的（跑第二次不会出错）",
+          tray.emergency_restore("重复调用") in (False,))
+    tray._emergency_done = False
+    cfg.set("restore_on_exit", False, save=False)
+    nest.take_from_desktop(cfg.desktop)
+    did = tray.emergency_restore("测试：用户关掉了自动还原")
+    check("用户关掉「退出自动还原」时应急还原不动手", did is False)
+    cfg.set("restore_on_exit", True, save=False)
+    tray._emergency_done = False
+    tray.emergency_restore("恢复现场")
+    pump(0.4)
+    check("恢复现场：桌面回到 5 项",
+          len(list(cfg.desktop.iterdir())) >= 5,
+          str(len(list(cfg.desktop.iterdir()))))
+
+    print()
+    print("── BUG2. 常用软件：图标 / 增删同步 / 不留空白 ──")
+    # 重新扫描，让面板有内容
+    tray.refresh()
+    deadline = time.time() + 25
+    while tray._scan is not None and tray._scan.isRunning() and time.time() < deadline:
+        app.processEvents()
+        time.sleep(0.05)
+    pump(1)
+
+    while cfg.quick_items:
+        cfg.remove_quick(cfg.quick_items[0]["path"])
+    browser.rebuild_apps()
+    dock.rebuild()
+    pump(0.5)
+
+    # 用多选弹窗批量添加。
+    # 注入点是 browser._ask_multi —— 直接改 widgets.multi_pick 无效，
+    # 因为 desktop_browser 是 `from widgets import multi_pick` 按值导入的，
+    # 换源头不影响它，结果会真的弹出模态窗把测试挂死。
+    def fake_multi(title, hint, entries, confirm_text="确定", parent=None):
+        return [entries[0][0], entries[2][0]]      # 勾第 1、3 项
+
+    browser._ask_multi = fake_multi
+    try:
+        browser.add_quick_dialog()
+    finally:
+        del browser._ask_multi
+    pump(2.5)
+    check("批量添加：配置增加到 2 项", len(cfg.quick_items) == 2,
+          str(len(cfg.quick_items)))
+    check("批量添加：UI 同步 2 个按钮", len(browser._app_buttons) == 2,
+          str(len(browser._app_buttons)))
+    check("批量添加：按钮顺序与配置一致",
+          [b.app_name for b in browser._app_buttons] ==
+          [e["name"] for e in cfg.quick_items])
+    empty = [b.app_name for b in browser._app_buttons
+             if b.icon() is None or b.icon().isNull()]
+    check("批量添加后图标都加载出来了", not empty, f"空的: {empty}")
+
+    # 再加一个，旧的图标不能丢
+    cfg.add_quick_many([(desktop / "新软件.lnk", "新软件")])
+    browser.rebuild_apps()
+    pump(2.5)
+    empty2 = [b.app_name for b in browser._app_buttons
+              if b.icon() is None or b.icon().isNull()]
+    check("加新项后旧项图标仍在", not empty2, f"空的: {empty2}")
+
+    # 批量删除
+    def fake_multi_del(title, hint, entries, confirm_text="确定", parent=None):
+        return [entries[0][0], entries[1][0]]
+
+    browser._ask_multi = fake_multi_del
+    try:
+        before = len(cfg.quick_items)
+        browser.remove_quick_dialog()
+    finally:
+        del browser._ask_multi
+    pump(1)
+    check("批量删除：配置减少 2 项", len(cfg.quick_items) == before - 2,
+          f"{before} -> {len(cfg.quick_items)}")
+    check("批量删除：UI 与配置一致",
+          [b.app_name for b in browser._app_buttons] ==
+          [e["name"] for e in cfg.quick_items],
+          f"{[b.app_name for b in browser._app_buttons]} vs "
+          f"{[e['name'] for e in cfg.quick_items]}")
+
+    # 不留空白：布局 widget 数 = 配置数 + 2 个按钮
+    from desktop_browser import AppButton
+
+    live = []
+    for i in range(browser.apps_row.count()):
+        w = browser.apps_row.itemAt(i).widget()
+        if isinstance(w, AppButton):
+            live.append(w)
+    check("布局里没有残留的旧按钮", len(live) == len(cfg.quick_items),
+          f"{len(live)} vs {len(cfg.quick_items)}")
+
+    # 删除按钮存在且位置紧挨添加按钮
+    check("有删除按钮", hasattr(browser, "btn_del_app"))
+    add_idx = browser.apps_row.indexOf(browser.btn_add_app)
+    del_idx = browser.apps_row.indexOf(browser.btn_del_app)
+    check("删除按钮紧挨在添加按钮右侧", del_idx == add_idx + 1,
+          f"添加@{add_idx} 删除@{del_idx}")
+
+    # 删空后删除按钮应变灰
+    while cfg.quick_items:
+        cfg.remove_quick(cfg.quick_items[0]["path"])
+    browser.rebuild_apps()
+    pump(0.3)
+    check("删空后删除按钮自动禁用", not browser.btn_del_app.isEnabled())
+
+    print()
+    print("── BUG2. Dock 侧也有配套的＋/－ ──")
+    check("菜单栏有删除按钮", hasattr(dock, "del_btn"))
+    dock_add = dock.row.indexOf(dock.add_btn)
+    dock_del = dock.row.indexOf(dock.del_btn)
+    check("菜单栏删除按钮紧挨添加按钮", dock_del == dock_add + 1,
+          f"添加@{dock_add} 删除@{dock_del}")
+
+    print()
+    print("── BUG3. Dock 只在最大化/全屏时避让 ──")
+    check("菜单栏可见（基线）", dock.isVisible() or bool(cfg.get("dock_visible", True)))
+
+    # 普通窗口：不应判为"要让开"
+    class R:
+        left, top, right, bottom = 100, 100, 900, 700
+
+    # 直接验证判据：小于工作区 80% 面积的窗口一律不算
+    def verdict(w, h, work_w=1920, work_h=1040):
+        """复刻 _foreground_is_fullscreen 里的尺寸判据（纯算术，不依赖真实窗口）。"""
+        mon_w, mon_h = 1920, 1080
+        if w >= mon_w * 0.96 and h >= mon_h * 0.96:
+            return True
+        coverage = (w * h) / float(work_w * work_h)
+        if coverage >= 0.80 and h >= work_h * 0.90:
+            return True
+        if w >= mon_w * 0.98 and h >= work_h * 0.94:
+            return True
+        return False
+
+    check("小窗口不避让", not verdict(800, 600))
+    check("中等窗口不避让", not verdict(1200, 800))
+    check("竖直条状窗口不避让（防止误判）", not verdict(520, 1040))
+    check("宽扁条状窗口不避让（防止误判）", not verdict(1900, 640))
+    check("最大化窗口避让（Chrome 实测尺寸）", verdict(1619, 1036))
+    check("真全屏避让", verdict(1920, 1080))
+
+    # 桌面空闲：前台是桌面时，既不该让开，也不该把菜单栏藏起来
+    original_desktop = tray._desktop_is_foreground
+    try:
+        tray._desktop_is_foreground = lambda: True
+        # 真实场景：人回到桌面，菜单栏是显示状态，长时间闲置也不能消失
+        dock.show_bar()
+        pump(0.3)
+        tray._fs_streak = 0
+        tray._normal_streak = 0
+        for _ in range(6):                  # 模拟闲置很久（6 个 tick ≈ 7 秒）
+            tray._auto_show_tick()
+            pump(0.15)
+        check("桌面空闲很久后菜单栏仍然在", dock.isVisible())
+        check("桌面空闲不算「要让开」", not tray._foreground_is_fullscreen())
+
+        # 极端情况：菜单栏本来隐藏着（被上一个全屏程序让开过），
+        # 回到桌面后必须能自动回来
+        dock.hide_bar()
+        pump(0.2)
+        tray._fs_streak = 0
+        tray._normal_streak = 0
+        for _ in range(4):
+            tray._auto_show_tick()
+            pump(0.15)
+        check("从全屏回到桌面后菜单栏能自动回来", dock.isVisible())
+    finally:
+        tray._desktop_is_foreground = original_desktop
+
+    print()
+    print("── BUG3. 防抖：不会频繁闪现 ──")
+    original_fs = tray._foreground_is_fullscreen
+    try:
+        # 先接管"前台是不是全屏"的判断，否则测不了：
+        # 跑测试时真实前台窗口很可能就是最大化的浏览器（本机实测 1619x1036，
+        # 覆盖 81%），那样 dock 会被正常地藏起来，起点就不成立了。
+        tray._foreground_is_fullscreen = lambda: False
+        dock.show_bar()
+        pump(0.4)
+        tray._fs_streak = 0
+        tray._normal_streak = 0
+        check("防抖起点：菜单栏可见且计数归零",
+              dock.isVisible() and tray._fs_streak == 0,
+              f"visible={dock.isVisible()} fs={tray._fs_streak}")
+
+        # 伪造「一直全屏」：必须连续两次才隐藏，避免动画瞬间就闪掉
+        tray._foreground_is_fullscreen = lambda: True
+        tray._auto_show_tick()
+        still_visible_after_one = dock.isVisible()
+        check("全屏第一次 tick 不隐藏（防抖）", still_visible_after_one,
+              f"fs_streak={tray._fs_streak}")
+        tray._auto_show_tick()
+        hidden_after_two = not dock.isVisible()
+        check("全屏连续两次 tick 才隐藏", hidden_after_two)
+
+        # 恢复：也要连续两次
+        tray._foreground_is_fullscreen = lambda: False
+        tray._normal_streak = 0
+        tray._auto_show_tick()
+        check("恢复第一次 tick 不显示（防抖）", not dock.isVisible())
+        tray._auto_show_tick()
+        check("恢复连续两次 tick 才显示", dock.isVisible())
+
+        # 抖动场景：全屏/普通交替不应该导致反复显隐
+        dock.show_bar()
+        pump(0.2)
+        tray._fs_streak = 0
+        tray._normal_streak = 0
+        stays = True
+        for i in range(6):
+            tray._foreground_is_fullscreen = (lambda v: (lambda: v))(i % 2 == 0)
+            before = dock.isVisible()
+            tray._auto_show_tick()
+            if dock.isVisible() != before:
+                stays = False
+        check("全屏/普通交替抖动时菜单栏不闪隐闪现", stays)
+    finally:
+        tray._foreground_is_fullscreen = original_fs
+        tray._fs_streak = 0
+        tray._normal_streak = 0
+
+    print()
+    print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")
+    for item in FAIL:
+        print("  ·", item)
+    tray._quitting = True
+    try:
+        tray.shutdown()
+    except Exception as exc:  # noqa: BLE001
+        print("  (shutdown 异常:", exc, ")")
+    app.processEvents()
+    return 1 if FAIL else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

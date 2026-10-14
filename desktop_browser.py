@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 桌面收纳面板（Dock 第一个控件点开的那个窗口）
@@ -39,6 +39,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from qt_compat import (
+    popup_menu,
     QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu,
     QMessageBox, QPoint, QPushButton, QScrollArea, QSize, QToolButton,
     QVBoxLayout, QWidget, Qt, QTimer, Signal,
@@ -49,7 +50,7 @@ import nest
 import theme as theme_mod
 from textutil import fuzzy_match
 from widgets import (GlassCardMixin, IconLoader, PLACEHOLDER_COLORS, app_icon,
-                     icon_hint_for, letter_pixmap, pixmap_for)
+                     icon_hint_for, letter_pixmap, multi_pick, pixmap_for)
 
 GRID_ICON = 48
 ICON_REQUEST = 64              # 向 Windows 要更大的图标再缩，清晰得多
@@ -445,12 +446,103 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         self.btn_add_app = QToolButton(self.apps_host)
         self.btn_add_app.setObjectName("AppAdd")
         self.btn_add_app.setText("＋\n添加")
-        self.btn_add_app.setToolTip("把程序或文件加到常用启动")
+        self.btn_add_app.setToolTip("把程序或文件加到常用启动（可多选批量添加）")
         self.btn_add_app.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_add_app.setFixedSize(78, 66)
         self.btn_add_app.clicked.connect(self._show_add_menu)
         self.apps_row.addWidget(self.btn_add_app)
+
+        # ---- 删除按钮：紧挨着「＋添加」，批量移除常用启动 ----
+        self.btn_del_app = QToolButton(self.apps_host)
+        self.btn_del_app.setObjectName("AppDel")
+        self.btn_del_app.setText("－\n删除")
+        self.btn_del_app.setToolTip("从常用启动里批量移除（可多选）")
+        self.btn_del_app.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_del_app.setFixedSize(78, 66)
+        self.btn_del_app.clicked.connect(self.remove_quick_dialog)
+        # 一个都没有时没什么可删的，直接禁用，别让用户点了个空弹窗
+        self.btn_del_app.setEnabled(bool(self._app_buttons))
+        self.apps_row.addWidget(self.btn_del_app)
+
         self.apps_row.addStretch(1)
+        # 没有任何常用项时「删除」没有意义，直接禁用（重建时也要重新判一次，
+        # 否则删空之后按钮还亮着，点了只弹一个空弹窗）
+        if hasattr(self, "btn_del_app"):
+            self.btn_del_app.setEnabled(bool(self._app_buttons))
+        # 增删之后行数/宽度会变，重新排一次版，避免留下空白
+        self.apps_host.updateGeometry()
+
+    def rebuild_apps(self) -> None:
+        """公开的"重建常用启动这一排"入口（供主程序信号回调调用）。"""
+        self._rebuild_apps()
+
+    # ------------------------------------------------------------------
+    # 常用启动：批量添加 / 批量删除
+    # ------------------------------------------------------------------
+    def _quick_name(self, path: Path) -> str:
+        """给常用项取显示名：优先用"不带后缀"的名字，和别处保持一致。"""
+        return engine.display_name(path.name, False, self.show_extensions())
+
+    def _ask_multi(self, title: str, hint: str,
+                   entries: "list[tuple[str, str]]", confirm_text: str):
+        """弹多选列表。
+
+        单独抽成一个方法是为了**可测试**：自动化测试里把它换成"直接返回
+        指定 key"，就能在没有真人点复选框的情况下验证整条增删链路。
+        直接打补丁改 `widgets.multi_pick` 是没用的——本模块是
+        `from widgets import multi_pick` 按值导入的，改源头不影响这里。
+        """
+        return multi_pick(title, hint, entries, confirm_text, self)
+
+    def add_quick_dialog(self) -> None:
+        """从**下面的列表**里勾选多项，批量加入常用启动。
+
+        需求：「按下从下面列表中选择按钮后，下方软件列表增加复选框，
+        支持多选批量添加」。所以这里弹的是复选框列表，不是单选下拉。
+        """
+        if not self._items:
+            QMessageBox.information(self, "加为常用启动",
+                                    "收纳面板里还没有内容。\n先收纳桌面，或点「浏览文件…」挑一个程序。")
+            return
+        # 已经是常用的就不再列出来，避免勾了没反应
+        candidates = [i for i in self._items if not self.cfg.is_quick(i.path)]
+        if not candidates:
+            QMessageBox.information(self, "加为常用启动",
+                                    "下面列表里的项目都已经在常用启动里了。")
+            return
+        entries = [(str(i.path), self._quick_name(i.path)) for i in candidates]
+        chosen = self._ask_multi(
+            "批量加为常用启动",
+            f"勾选要固定到「常用启动」的项目（共 {len(entries)} 项可选）：",
+            entries, "加入")
+        if not chosen:
+            return
+        by_key = {str(i.path): i for i in candidates}
+        added = self.cfg.add_quick_many(
+            [(p, self._quick_name(by_key[p].path)) for p in chosen if p in by_key])
+        self.rebuild_apps()
+        self.request_quick_changed.emit()
+        self.hint.setText(f"已把 {added} 项加入常用启动" if added else "这些项目已经在常用启动里了")
+
+    def remove_quick_dialog(self) -> None:
+        """勾选多项，批量从常用启动移除。"""
+        items = self.cfg.quick_items
+        if not items:
+            QMessageBox.information(self, "移除常用启动", "常用启动里还没有项目。")
+            return
+        entries = [(e["path"], e["name"] or Path(e["path"]).name) for e in items]
+        chosen = self._ask_multi(
+            "批量移除常用启动",
+            f"勾选要移出「常用启动」的项目（共 {len(entries)} 项）：\n"
+            "只影响这一排快捷方式，不会动桌面上的文件。",
+            entries, "移除")
+        if not chosen:
+            return
+        removed = self.cfg.remove_quick_many(chosen)
+        # 先重建 UI 再通知外面：保证"配置—UI"两边的顺序、数量完全一致
+        self.rebuild_apps()
+        self.request_quick_changed.emit()
+        self.hint.setText(f"已移除 {removed} 项")
 
     def _launch_app(self, button: AppButton) -> None:
         ok, reason = engine.launch(button.path)
@@ -463,7 +555,7 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         action_reveal = menu.addAction("打开文件所在位置")
         menu.addSeparator()
         action_remove = menu.addAction("从常用启动移除")
-        chosen = menu.exec(pos)
+        chosen = popup_menu(menu, pos)
         if chosen is None:
             return
         if chosen is action_open:
@@ -476,14 +568,18 @@ class DesktopBrowser(GlassCardMixin, QWidget):
             self.request_quick_changed.emit()
 
     def _show_add_menu(self) -> None:
-        from qt_compat import QFileDialog, QInputDialog
+        from qt_compat import QFileDialog
 
         menu = QMenu(self)
-        action_here = menu.addAction("从下面的列表里选…")
+        action_here = menu.addAction("从下面的列表里选…（可多选）")
         action_file = menu.addAction("浏览文件…")
-        chosen = menu.exec(self.btn_add_app.mapToGlobal(
+        chosen = popup_menu(menu, self.btn_add_app.mapToGlobal(
             QPoint(0, self.btn_add_app.height())))
         if chosen is None:
+            return
+        if chosen is action_here:
+            # 多选批量添加
+            self.add_quick_dialog()
             return
         if chosen is action_file:
             path, _filter = QFileDialog.getOpenFileName(
@@ -492,26 +588,9 @@ class DesktopBrowser(GlassCardMixin, QWidget):
             if path:
                 target = Path(path)
                 if self.cfg.add_quick(target, target.stem):
-                    self._rebuild_apps()
+                    self.rebuild_apps()
                     self.request_quick_changed.emit()
             return
-        if chosen is action_here:
-            if not self._items:
-                return
-            show_ext = self.show_extensions()
-            names = [engine.display_name(i.name, i.is_dir, show_ext)
-                     for i in self._items]
-            if len(set(names)) != len(names):
-                # 剥掉后缀后重名了（报告.docx / 报告.txt）→ 退回完整名，别让人选错
-                names = [i.name for i in self._items]
-            name, ok = QInputDialog.getItem(self, "加为常用", "选择要固定的项目：",
-                                            names, 0, False)
-            if ok and name:
-                item = self._items[names.index(name)]
-                if self.cfg.add_quick(item.path,
-                                      item.path.stem if item.path.suffix else item.name):
-                    self._rebuild_apps()
-                    self.request_quick_changed.emit()
 
     # ---- 过滤 / 分页 ----
     def _filtered(self) -> "list[engine.RepoItem]":
@@ -723,7 +802,7 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         action_copy = menu.addAction("复制完整路径")
         action_size = menu.addAction("查看文件夹大小") if item.is_dir else None
 
-        chosen = menu.exec(pos)
+        chosen = popup_menu(menu, pos)
         if chosen is None:
             return
         if chosen is action_open:
@@ -760,7 +839,7 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         action_restore_all = menu.addAction("全部还原到桌面")
         action_settings = menu.addAction("设置…")
         action_hide = menu.addAction("隐藏")
-        chosen = menu.exec(self.btn_more.mapToGlobal(QPoint(0, self.btn_more.height())))
+        chosen = popup_menu(menu, self.btn_more.mapToGlobal(QPoint(0, self.btn_more.height())))
         if chosen is action_restore_all:
             self.request_restore_all.emit()
         elif chosen is action_settings:

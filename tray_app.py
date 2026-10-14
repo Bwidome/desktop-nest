@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import traceback
 import ctypes
 from ctypes import wintypes
 from pathlib import Path
@@ -96,6 +98,12 @@ class TrayApp(QWidget):
         self._quitting = False
         self._repository_note = ""
         self._dock_hidden_for_fullscreen = False
+        # 崩溃兜底：应急还原只跑一次
+        self._emergency_done = False
+        self._original_excepthook = None
+        # 全屏让开的防抖计数（连续两次才动作，见 _auto_show_tick）
+        self._fs_streak = 0
+        self._normal_streak = 0
 
         # ---- 子窗口 ----
         self.panel = MainPanel(cfg)
@@ -618,17 +626,16 @@ class TrayApp(QWidget):
                 return True
             # 2) 最大化：按**面积占比**判断。
             #    不能要求"宽高都接近 100%"——实测 1920x1080 上最大化的窗口是
-            #    1619x1036（宽度只占 84%），按边长判会漏掉，这正是之前
-            #    "打开浏览器不让开"没修好的原因。
+            #    1619x1036（宽度只占 84%），按边长判会漏掉。
+            #    但也不能只看"盖住了菜单栏那块区域"——普通窗口拖到屏幕底部、
+            #    窗口打开动画的中间帧都会短暂满足那个条件，结果就是菜单栏
+            #    疯狂闪现（"打开非全屏软件菜单栏频繁闪烁"就是这么来的）。
+            #    所以这里只认"够大"的窗口：宽度也得占够，否则一律不让开。
             coverage = (width * height) / float(work_width * work_height)
             if coverage >= 0.80 and height >= work_height * 0.90:
                 return True
-            # 3) 盖住了菜单栏所在的那块区域
-            if self.dock.isVisible():
-                dock_rect = self.dock.geometry()
-                if (rect.left <= dock_rect.left() and rect.right >= dock_rect.right()
-                        and rect.bottom >= dock_rect.top()):
-                    return True
+            if width >= mon_width * 0.98 and height >= work_height * 0.94:
+                return True
             return False
         except Exception:
             return False
@@ -644,16 +651,28 @@ class TrayApp(QWidget):
         ⚠️ 这里**只动窗口的可见性**（`show_bar` / `hide_bar`），
         绝不改 `dock_visible` / `dock_hidden_by_user` 这些状态变量——
         否则"打开收纳面板"会被误当成"用户把菜单栏关了"，之后再也不自动弹回来。
+
+        **防闪烁**：只有当"要让开"这个状态**连续两次 tick（约 2.4 秒）都成立**
+        才真的隐藏；恢复则要求"不需要让开"连续两次成立。这样：
+        * 切换程序、窗口动画、拖动窗口这些瞬时状态不会引起显隐抖动；
+        * 用户真的最大化/全屏时，最多 2.4 秒后让开，感知上依然是"立刻"。
         """
         try:
             if bool(self.cfg.get("dock_hidden_by_user", False)):
-                return                       # 用户手动关的：保持隐藏，绝不自动恢复
-            if not bool(self.cfg.get("dock_auto_show", True)):
+                # 用户手动关的：保持隐藏，绝不自动恢复
+                self._fs_streak = 0
+                self._normal_streak = 0
                 return
+            if not bool(self.cfg.get("dock_auto_show", True)):
+                self._fs_streak = 0
+                self._normal_streak = 0
+                return
+
             if self._dock_in_use():
                 # 收纳面板开着（翻页 / 搜索）时菜单栏必须稳住：不让开，也不隐藏。
-                # 之前"翻页时菜单栏时不时消失"就是这里漏了自己人的判断。
                 self._dock_hidden_for_fullscreen = False
+                self._fs_streak = 0
+                self._normal_streak = 0
                 if not self.dock.isVisible() and bool(self.cfg.get("dock_visible", True)):
                     self.dock.show_bar()
                     self.rebuild_tray_menu()
@@ -661,18 +680,29 @@ class TrayApp(QWidget):
 
             fullscreen = self._foreground_is_fullscreen()
             if fullscreen:
-                if self.dock.isVisible() and bool(self.cfg.get("dock_avoid_fullscreen", True)):
+                self._normal_streak = 0
+                self._fs_streak += 1
+                # 连续两次确认才让开，避开窗口打开动画等瞬时状态
+                if (self._fs_streak >= 2 and self.dock.isVisible()
+                        and bool(self.cfg.get("dock_avoid_fullscreen", True))):
                     self.dock.hide_bar()
                     self._dock_hidden_for_fullscreen = True
                 return
 
+            self._fs_streak = 0
             if not self.dock.isVisible():
-                # 因为全屏让开的，或者本来配置就是要显示的，都补回来
+                # 该不该恢复：因为我们让开过，或者配置本来就是要显示的
                 if self._dock_hidden_for_fullscreen \
                         or bool(self.cfg.get("dock_visible", True)):
-                    self._dock_hidden_for_fullscreen = False
-                    self.dock.show_bar()
-                    self.rebuild_tray_menu()
+                    self._normal_streak += 1
+                    if self._normal_streak >= 2:
+                        self._dock_hidden_for_fullscreen = False
+                        self._normal_streak = 0
+                        self.dock.show_bar()
+                        self.rebuild_tray_menu()
+            else:
+                # 已经显示着，就别再调 show_bar——重复 show + raise 本身就会闪
+                self._normal_streak = 0
         except Exception as exc:
             config.log(f"菜单栏自动显隐失败：{type(exc).__name__}: {exc}")
         finally:
@@ -732,6 +762,98 @@ class TrayApp(QWidget):
     # ------------------------------------------------------------------
     # 还原
     # ------------------------------------------------------------------
+    def emergency_restore(self, reason: str = "") -> bool:
+        """**不做任何询问**，直接把收纳目录里的东西搬回桌面。
+
+        这个方法是给"崩溃兜底"用的，必须满足几个苛刻条件：
+
+        * **不能弹窗**——崩溃路径上再弹模态框就是二次事故；
+        * **不能抛异常**——它自己崩了就没兜底了，所以整体 try/except 包住；
+        * **可重入**——退出流程和异常钩子可能都调它，用标志位保证只跑一次；
+        * **尊重用户设置**——用户明确关掉"退出自动还原"就不动（`force` 场景除外）。
+
+        返回是否真的执行了还原。
+        """
+        if self._emergency_done:
+            return False
+        self._emergency_done = True
+        try:
+            if not bool(self.cfg.get("restore_on_exit", True)):
+                return False
+            if not nest.nest_has_content():
+                # 桌面是干净的，但图标可能被我们藏起来了，也要恢复
+                self._show_desktop_icons()
+                return False
+            result = nest.restore_to_desktop(self.cfg.desktop)
+            self._show_desktop_icons()
+            config.log(f"应急还原（{reason or '未知原因'}）：{result.summary()}")
+            if result.failed:
+                for name, why in result.failed[:8]:
+                    config.log(f"  未能还原：{name} —— {why}")
+            try:
+                self.cfg.set("nest_active", False)
+                self.cfg.save()
+            except Exception:
+                pass
+            return True
+        except Exception as exc:  # noqa: BLE001
+            try:
+                config.log(f"应急还原失败：{type(exc).__name__}: {exc}")
+            except Exception:
+                pass
+            return False
+
+    def install_crash_guards(self) -> None:
+        """挂上全局异常钩子：**任何未捕获异常都要先把桌面还回去**。
+
+        为什么必须有这个：程序把桌面文件暂存在收纳目录里，一旦崩在
+        "收纳完成、还没还原"的窗口期，用户看到的就是**空桌面**——哪怕文件其实
+        都还在。所以崩溃路径上第一件事必须是还原，绝不能让用户以为文件丢了。
+
+        覆盖三条路径：
+        1. 主线程未捕获异常（`sys.excepthook`）；
+        2. 子线程未捕获异常（`threading.excepthook`，扫描线程就属于这类）；
+        3. Qt 事件循环内部抛出的异常（`app.exec()` 那层 try/except）。
+        """
+        self._emergency_done = False
+        original_hook = sys.excepthook
+
+        def hook(exc_type, exc_value, exc_tb):
+            try:
+                detail = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+                config.log("未捕获异常：\n" + detail)
+            except Exception:
+                pass
+            self.emergency_restore(f"未捕获异常 {getattr(exc_type, '__name__', exc_type)}")
+            if original_hook is not None and original_hook is not sys.__excepthook__:
+                try:
+                    original_hook(exc_type, exc_value, exc_tb)
+                    return
+                except Exception:
+                    pass
+            try:
+                sys.__excepthook__(exc_type, exc_value, exc_tb)
+            except Exception:
+                pass
+
+        sys.excepthook = hook
+        self._original_excepthook = original_hook
+
+        def thread_hook(args):
+            try:
+                detail = "".join(traceback.format_exception(
+                    args.exc_type, args.exc_value, args.exc_traceback))
+                config.log(f"线程 {getattr(args.thread, 'name', '?')} 未捕获异常：\n{detail}")
+            except Exception:
+                pass
+            self.emergency_restore(
+                f"线程异常 {getattr(args.exc_type, '__name__', args.exc_type)}")
+
+        try:
+            threading.excepthook = thread_hook
+        except Exception:
+            pass
+
     def restore_desktop(self) -> None:
         """把收纳目录里的全部内容（含文件夹）还原回桌面。"""
         items = nest.list_nest_items()
@@ -820,6 +942,9 @@ class TrayApp(QWidget):
             self.restore_desktop_on_exit()
         except Exception as exc:
             config.log(f"退出还原失败：{type(exc).__name__}: {exc}")
+            # 正常还原路径出问题，让应急还原再兜一次（它自带重入保护，
+            # 成功过一次就不会重复跑）
+            self.emergency_restore("退出还原失败")
         self.cfg.save()
 
     # ------------------------------------------------------------------
@@ -856,7 +981,26 @@ def run() -> int:
 
     window = TrayApp(cfg, silent=silent)
     window._app = app
-    return app.exec()
+    # 挂上全局异常钩子：之后任何未捕获异常都会**先把桌面还原回去**再退出。
+    # 必须在进入事件循环之前装好，否则启动阶段崩掉就没有兜底。
+    window.install_crash_guards()
+
+    try:
+        return app.exec()
+    except BaseException as exc:  # noqa: BLE001
+        # Qt 事件循环里抛出来的异常也走这里兜底
+        try:
+            config.log(f"事件循环异常退出：{type(exc).__name__}: {exc}")
+        except Exception:
+            pass
+        window.emergency_restore(f"事件循环异常 {type(exc).__name__}")
+        raise
+    finally:
+        # 正常退出路径也保证还原一次（重入保护，不会重复搬）
+        try:
+            window.emergency_restore("事件循环结束")
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

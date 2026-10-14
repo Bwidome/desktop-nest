@@ -258,19 +258,24 @@ def main() -> int:
     original = tray._desktop_is_foreground
     tray._desktop_is_foreground = lambda: True
     try:
+        # 现在有防抖：单次 tick 只累计一次，连续两次才动作（避免切换程序时闪烁）
         tray._auto_show_tick()
         app.processEvents()
-        check("检测到回到桌面 → 菜单栏自动显示", dock.isVisible())
+        check("第一次 tick 只累计、不立刻动作（防抖）", not dock.isVisible())
+        tray._auto_show_tick()
+        app.processEvents()
+        check("连续两次确认后 → 菜单栏自动显示", dock.isVisible())
     finally:
         tray._desktop_is_foreground = original
 
-    # 用户主动隐藏时不该自动弹
+    # 用户主动隐藏时不该自动弹（多跑几次确认不会累积后弹出来）
     dock.hide_self()
     app.processEvents()
     tray._desktop_is_foreground = lambda: True
     try:
-        tray._auto_show_tick()
-        app.processEvents()
+        for _ in range(4):
+            tray._auto_show_tick()
+            app.processEvents()
         check("用户主动隐藏后，即使回到桌面也不弹", not dock.isVisible())
     finally:
         tray._desktop_is_foreground = original

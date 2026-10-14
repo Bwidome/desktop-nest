@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 桌面收纳美化工具 —— 配置持久化
@@ -278,6 +278,40 @@ class Config:
             return False
         self.set("quick_items", items)
         return True
+
+    def add_quick_many(self, entries: "list[tuple[Path | str, str | None]]") -> int:
+        """批量加入常用启动，返回**实际新增**的数量。
+
+        已存在的会被跳过（不报错、不重复）。一次性写盘，避免逐条 `set()`
+        造成"配置写了一半"的中间状态——之前批量操作时 UI 读到的是中间态，
+        表现就是"加了新的、旧的却没了"。
+        """
+        items = self.quick_items
+        known = {os.path.normcase(i["path"]) for i in items}
+        added = 0
+        for path, name in entries:
+            key = os.path.normcase(str(path))
+            if key in known:
+                continue
+            known.add(key)
+            p = Path(path)
+            items.append({"path": str(p), "name": name or p.stem or p.name})
+            added += 1
+        if added:
+            self.set("quick_items", items)
+        return added
+
+    def remove_quick_many(self, paths: "list[Path | str]") -> int:
+        """批量移除常用启动，返回实际移除的数量（同样只写一次盘）。"""
+        targets = {os.path.normcase(str(p)) for p in paths}
+        if not targets:
+            return 0
+        before = self.quick_items
+        items = [i for i in before if os.path.normcase(i["path"]) not in targets]
+        removed = len(before) - len(items)
+        if removed:
+            self.set("quick_items", items)
+        return removed
 
     def move_quick(self, index: int, delta: int) -> bool:
         items = self.quick_items

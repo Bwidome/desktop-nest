@@ -12,6 +12,7 @@
 6. 全屏应用（看视频等）时菜单栏要让开，不遮挡
 7. 收纳面板不是普通应用窗口，而是贴底的**磨砂玻璃上拉浮层**
 8. 打开 / 反复翻页收纳面板时，底部菜单栏不会无故消失
+9. 菜单栏底板是**纯透明**的，而且只有一行（图标与控制按钮同一水平线）
 
 用法：python dev/test_dock_fixes.py
 """
@@ -194,6 +195,13 @@ def main() -> int:
     check("窗口尺寸贴近内容（不留空白）",
           abs(dock.height() - dock.sizeHint().height()) <= 24,
           f"height={dock.height()} sizeHint={dock.sizeHint().height()}")
+    # 底板改成纯透明之后，菜单栏必须**只有一行**——分两行会变成上下两撮图标
+    # 各自浮着，很难看。这里比垂直中心：图标区和 ＋ 按钮要在同一条水平线上。
+    flow_mid = dock.apps_flow.geometry().center().y()
+    add_mid = dock.add_btn.geometry().center().y()
+    check("菜单栏只有一行（＋ 与图标同一水平线）",
+          abs(flow_mid - add_mid) <= 4,
+          f"图标中线 {flow_mid} vs ＋ 中线 {add_mid}")
     check("收纳内容仍保留为「＋ 添加」的候选",
           len(dock._items) == len(tray.nest_items),
           f"{len(dock._items)} vs {len(tray.nest_items)}")

@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 主面板
@@ -44,6 +44,7 @@ import time
 from pathlib import Path
 
 from qt_compat import (
+    popup_menu,
     QCheckBox, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton, QTabWidget,
     QToolButton, QTreeWidget, QTreeWidgetItem, Qt, QVBoxLayout, QWidget, Signal,
 )
@@ -574,7 +575,7 @@ class MainPanel(GlassCardMixin, QWidget):
         action_quick = menu.addAction("从常用启动移除" if is_quick else "加为常用启动")
         action_restore = menu.addAction("还原到桌面")
         action_copy = menu.addAction("复制完整路径")
-        chosen = menu.exec(self.items_tree.viewport().mapToGlobal(pos))
+        chosen = popup_menu(menu, self.items_tree.viewport().mapToGlobal(pos))
         if chosen is action_open:
             self._open_item(node)
         elif chosen is action_reveal:

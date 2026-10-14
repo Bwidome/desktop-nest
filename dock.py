@@ -13,10 +13,12 @@
   再点一次收起。分页浏览收纳内容**全部在收纳面板里完成**，
   菜单栏本身不再放那排分页条目（那一行已经删掉）。
 * 中间是常用启动项，同样是图标 + 名称
-* 右边依次是 ＋ 添加、⚙ 设置、✕ 隐藏整条菜单栏
+* 右边依次是 ＋ 添加、－ 移除、⚙ 设置、✕ 隐藏整条菜单栏
+* **全部挤在同一行**：底板已经透明，分两行会显得很散
 * 空白处右键出菜单栏设置；按住可左右拖动，位置会记住
 
-外观：深色半透明圆角条（见 theme 里的 `#DockSurface`）。
+外观：**纯透明的浮层**——没有底板，只有「桌面整理」控件和常用软件的图标
+（外加 ＋ / － / ⚙ / ✕ 四个小按钮）浮在桌面上，见 theme 里的 `#DockSurface`。
 """
 
 from __future__ import annotations
@@ -24,15 +26,17 @@ from __future__ import annotations
 from pathlib import Path
 
 from qt_compat import (
+    popup_menu,
     QColor, QFontMetrics, QFrame, QGridLayout, QHBoxLayout, QIcon, QMenu,
     QPainter, QPainterPath, QPixmap, QPoint, QSize, QToolButton, QVBoxLayout,
-    QWidget, Qt, QTimer, Signal,
+    QMessageBox, QWidget, Qt, QTimer, Signal,
 )
 
 import engine
 import safety
 import theme as theme_mod
-from widgets import (IconLoader, PLACEHOLDER_COLORS, app_icon, letter_pixmap)
+from widgets import (IconLoader, PLACEHOLDER_COLORS, app_icon, letter_pixmap,
+                     multi_pick)
 
 DOCK_ICON_SIZES = [36, 44, 52, 60]
 DEFAULT_ICON_SIZE = 44
@@ -67,12 +71,23 @@ class FlowRow(QWidget):
     常用启动加多了之后，一行放不下就会把图标挤扁、或者把菜单栏撑到屏幕外面。
     这里按可用宽度算出每行能放几个，多出来的换到下一行——
     菜单栏只会变高变宽到屏幕能容纳的程度，永远不会跑出屏幕。
+
+    ⚠️ **行列数必须自己记，不能问 QGridLayout。**
+    这是"删掉一个常用软件，菜单栏的宽度却不缩回去"的根因：
+    `QGridLayout` 在 `takeAt()` 之后**不会**把 `rowCount()/columnCount()` 收回
+    （实测删掉一项后 `_items` 只剩 5 个，网格仍报 6 列），
+    于是 `sizeHint()` 一直按旧列数算，菜单栏就永远维持着删之前的大小。
+    所以 `relayout()` 把算好的 `(columns, rows)` 存进 `self._columns/_rows`，
+    `sizeHint()` 只认这两个数，跟网格内部状态彻底解耦。
     """
 
     def __init__(self, parent=None, spacing: int = 3):
         super().__init__(parent)
         self._spacing = spacing
         self._items: "list[QWidget]" = []
+        # 由 relayout() 写入；0 表示"还没排过版"，此时退化成"一行摆完"
+        self._columns = 0
+        self._rows = 0
         self._grid = QGridLayout(self)
         self._grid.setContentsMargins(0, 0, 0, 0)
         self._grid.setSpacing(spacing)
@@ -85,6 +100,9 @@ class FlowRow(QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
         self._items = []
+        self._columns = 0
+        self._rows = 0
+        self.updateGeometry()
 
     def add_item(self, widget: QWidget) -> None:
         self._items.append(widget)
@@ -92,11 +110,36 @@ class FlowRow(QWidget):
     def item_count(self) -> int:
         return len(self._items)
 
+    def _effective_size(self, widget: QWidget) -> "QSize":
+        """控件在布局里**实际**会占的尺寸。
+
+        不能直接用 `sizeHint()`：`setFixedSize()` 只改 min/max，**不动
+        `sizeHint()`**。像 `DockIcon` 这种把尺寸定死的按钮，`sizeHint()` 报的
+        还是样式算出来的默认值（实测比实际窄 20 多像素），照它排版，
+        菜单栏会比内容窄一截、最后一个图标被裁掉。
+        这里按 `QWidgetItem` 的口径夹一次：sizeHint 先抬到 minimumSize、
+        再压到 maximumSize。
+        """
+        hint = widget.sizeHint()
+        minimum = widget.minimumSize()
+        maximum = widget.maximumSize()
+        width = min(max(hint.width(), minimum.width()), maximum.width())
+        height = min(max(hint.height(), minimum.height()), maximum.height())
+        return QSize(width, height)
+
+    def unit_size(self) -> "QSize":
+        """一个格子占多大（取所有条目里最大的那个）。"""
+        if not self._items:
+            return QSize(0, 0)
+        sizes = [self._effective_size(w) for w in self._items]
+        return QSize(max(s.width() for s in sizes),
+                     max(s.height() for s in sizes))
+
     def natural_width(self) -> int:
         """内容排成一行时需要多宽。"""
         if not self._items:
             return 0
-        unit = max(w.sizeHint().width() for w in self._items)
+        unit = self.unit_size().width()
         return unit * len(self._items) + self._spacing * (len(self._items) - 1)
 
     def relayout(self, max_width: int) -> None:
@@ -104,35 +147,50 @@ class FlowRow(QWidget):
         while self._grid.count():
             self._grid.takeAt(0)
         if not self._items:
+            self._columns = 0
+            self._rows = 0
+            self.updateGeometry()
             return
-        # 让每个格子只占它需要的大小，不要被拉伸（拉长了按钮会变形、图标会糊）
-        for index in range(self._grid.columnCount()):
-            self._grid.setColumnStretch(index, 0)
-        for index in range(self._grid.rowCount()):
-            self._grid.setRowStretch(index, 0)
 
-        unit_width = max(w.sizeHint().width() for w in self._items) + self._spacing
+        unit = self.unit_size()
+        unit_width = unit.width() + self._spacing
         columns = max(1, int(max_width // max(1, unit_width)))
+        columns = min(columns, len(self._items))      # 别留空列，否则尺寸算大
+        rows = (len(self._items) + columns - 1) // columns
+        self._columns = columns
+        self._rows = rows
+
         for index, widget in enumerate(self._items):
             widget.setParent(self)
             self._grid.addWidget(widget, index // columns, index % columns,
                                  Qt.AlignmentFlag.AlignLeft
                                  | Qt.AlignmentFlag.AlignVCenter)
+        # 让每个格子只占它需要的大小，不要被拉伸（拉长了按钮会变形、图标会糊）
+        for index in range(columns):
+            self._grid.setColumnStretch(index, 0)
+        for index in range(rows):
+            self._grid.setRowStretch(index, 0)
+        self._grid.invalidate()
         self.updateGeometry()
 
     def sizeHint(self):  # noqa: N802
-        """内容按当前排列所需的尺寸。"""
-        from qt_compat import QSize
-
-        if not self._items or not self._grid.count():
+        """内容按当前排列所需的尺寸（只认自己记的行列数）。"""
+        if not self._items:
             return QSize(0, 0)
-        rows = self._grid.rowCount()
-        columns = self._grid.columnCount()
-        unit_w = max(w.sizeHint().width() for w in self._items)
-        unit_h = max(w.sizeHint().height() for w in self._items)
-        width = unit_w * columns + self._spacing * max(0, columns - 1)
-        height = unit_h * rows + self._spacing * max(0, rows - 1)
+        unit = self.unit_size()
+        columns = self._columns or len(self._items)
+        rows = self._rows or 1
+        width = unit.width() * columns + self._spacing * max(0, columns - 1)
+        height = unit.height() * rows + self._spacing * max(0, rows - 1)
         return QSize(width, height)
+
+    def minimumSizeHint(self):  # noqa: N802
+        """最小尺寸同样只认自己的行列数。
+
+        不覆盖的话会落到 QGridLayout 上，而它那个"删了不缩"的旧列数
+        会把菜单栏的最小宽度顶住，`adjustSize()` 就再也收不回去了。
+        """
+        return self.sizeHint()
 
 
 class DockIcon(QToolButton):
@@ -163,7 +221,12 @@ class DockIcon(QToolButton):
         系统 DPI 缩放），而写死的宽度不会：在 125% / 150% 缩放下，
         「任务管理器」这种名字根本装不下，相邻两项的文字会叠在一起。
         所以改成用 QFontMetrics 实测文字宽度。
+
+        开头必须先 `ensurePolished()`：样式表里的字体要 polish 之后才生效，
+        不先抛一次的话这里量到的是默认字体，算出来的宽度偏窄，
+        等窗口显示出来又会变宽，菜单栏就会"长出来一截"。
         """
+        self.ensurePolished()
         if not self._show_text:
             self.setFixedSize(self.icon_size + 14, self.icon_size + 14)
             return
@@ -255,28 +318,52 @@ class DockBar(QWidget):
         column.setContentsMargins(10, 6, 10, 7)
         column.setSpacing(3)
 
-        # ---- 应用区：会自动换行，加再多也不会把菜单栏撑出屏幕 ----
+        # ---- 整条菜单栏就是**一行**：应用区（会自动换行）+ 控制按钮 ----
+        # 底板改成纯透明之后，只有一行才好看：以前是"应用一行、＋⚙✕ 另起一行"，
+        # 有深色底板兜着还像一整条；底板一去，就变成上下两撮图标各自浮着，很散。
+        # 所以「桌面整理 / 常用启动」和「＋ － ⚙ ✕」放进同一个 QHBoxLayout。
+        self.main_row = QHBoxLayout()
+        self.main_row.setSpacing(3)
+
+        # 应用区：会自动换行，加再多也不会把菜单栏撑出屏幕
         self.apps_flow = FlowRow(self.surface, spacing=3)
-        column.addWidget(self.apps_flow)
+        self.main_row.addWidget(self.apps_flow)
 
-        # ---- 控制行：添加 / 收起 / 设置 / 隐藏，固定不换行 ----
-        self.control_row = QHBoxLayout()
-        self.control_row.setSpacing(3)
-        column.addLayout(self.control_row)
+        column.addLayout(self.main_row)
 
-        # 兼容旧代码里对 self.row 的引用
-        self.row = self.control_row
+        # 兼容旧代码里对 self.control_row / self.row 的引用
+        self.control_row = self.main_row
+        self.row = self.main_row
+        # 控制按钮单独记一份：清空时只能摘掉它们，
+        # **不能**顺手把 apps_flow 也从布局里拿掉（那样应用区就整个没了）
+        self._control_buttons: "list[QWidget]" = []
 
     def _clear_row(self) -> None:
-        """清空应用区与控制行。"""
+        """清空应用区与控制按钮。"""
         self.apps_flow.clear_items()
-        while self.control_row.count():
-            entry = self.control_row.takeAt(0)
-            widget = entry.widget()
-            if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
+        for button in self._control_buttons:
+            self.main_row.removeWidget(button)
+            button.setParent(None)
+            button.deleteLater()
+        self._control_buttons = []
         self._buttons = []
+
+    def _add_control(self, widget: QWidget) -> None:
+        """把控制按钮摆进主行并登记（供 _clear_row 精确摘除）。"""
+        self.main_row.addWidget(widget)
+        self._control_buttons.append(widget)
+
+    def _controls_width(self) -> int:
+        """控制按钮那一串占的宽度（含间距）。
+
+        图标和控制按钮现在同处一行，算换行时要先把这段宽度扣掉，
+        否则应用区会按"整行都归我"来排，把控制按钮挤到屏幕外面去。
+        """
+        if not self._control_buttons:
+            return 0
+        gap = self.main_row.spacing()
+        return (sum(b.width() for b in self._control_buttons)
+                + gap * (len(self._control_buttons) + 1))
 
     def _divider(self) -> QFrame:
         line = QFrame(self.surface)
@@ -316,8 +403,17 @@ class DockBar(QWidget):
                 show_text=True,
             )
             button.setText(DockIcon.elide(name))
+            # 已经取过的图标**直接贴上**。
+            # 这是"加了个新常用软件，旧的图标全没了"的根因：`IconLoader.request()`
+            # 命中缓存时会直接 return、**不再发 ready 信号**，光靠 `_queue_icons()`
+            # 的话，重建后这些按钮会永远停在占位字母上（只有这次新加的那个
+            # 还没进缓存，才拿得到真图标）。desktop_browser 那边早就这么做了，
+            # 菜单栏这边漏了。
+            cached_icon = self.loader.cached(str(path))
+            if cached_icon is not None:
+                button.setIcon(cached_icon)
             button.context_requested.connect(
-                lambda _btn, e=entry, b=button: self._quick_menu(b, e))
+                lambda _btn, pos, e=entry, b=button: self._quick_menu(b, e, pos))
             self.apps_flow.add_item(button)
 
     # ------------------------------------------------------------------
@@ -335,11 +431,23 @@ class DockBar(QWidget):
         self.add_btn = QToolButton(self.surface)
         self.add_btn.setObjectName("DockAdd")
         self.add_btn.setText("＋")
-        self.add_btn.setToolTip("把程序或文件加到菜单栏")
+        self.add_btn.setToolTip("把程序或文件加到菜单栏（可多选批量添加）")
         self.add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.add_btn.setFixedSize(self._icon_size - 6, self._icon_size - 4)
         self.add_btn.clicked.connect(self._show_add_menu)
-        self.row.addWidget(self.add_btn)
+        self._add_control(self.add_btn)
+
+        # ---- 删除按钮：紧挨在「＋」右边，批量移除常用启动 ----
+        self.del_btn = QToolButton(self.surface)
+        self.del_btn.setObjectName("DockDel")
+        self.del_btn.setText("－")
+        self.del_btn.setToolTip("从菜单栏批量移除常用启动（可多选）")
+        self.del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.del_btn.setFixedSize(self._icon_size - 6, self._icon_size - 4)
+        self.del_btn.clicked.connect(self.remove_quick_dialog)
+        # 没有常用项时禁用，避免点了弹空窗
+        self.del_btn.setEnabled(bool(self.cfg.quick_items))
+        self._add_control(self.del_btn)
 
         self.settings_btn = QToolButton(self.surface)
         self.settings_btn.setObjectName("DockNav")
@@ -347,7 +455,7 @@ class DockBar(QWidget):
         self.settings_btn.setToolTip("设置")
         self.settings_btn.setFixedSize(self._icon_size - 10, self._icon_size - 6)
         self.settings_btn.clicked.connect(lambda: self.open_settings.emit())
-        self.row.addWidget(self.settings_btn)
+        self._add_control(self.settings_btn)
 
         # ---- 隐藏整条菜单栏 ----
         self.btn_hide_dock = QToolButton(self.surface)
@@ -358,9 +466,12 @@ class DockBar(QWidget):
         self.btn_hide_dock.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_hide_dock.setFixedSize(self._icon_size - 10, self._icon_size - 6)
         self.btn_hide_dock.clicked.connect(self.hide_self)
-        self.row.addWidget(self.btn_hide_dock)
+        self._add_control(self.btn_hide_dock)
 
-        self.control_row.addStretch(1)
+        self.main_row.addStretch(1)
+        # 重建后重新判断「删除」是否可用（删空之后要变灰，否则点了弹空窗）
+        if hasattr(self, "del_btn"):
+            self.del_btn.setEnabled(bool(self.cfg.quick_items))
         self._queue_icons()
         self.refit()
 
@@ -382,11 +493,18 @@ class DockBar(QWidget):
             self.surface.layout().activate()
         if self.layout() is not None:
             self.layout().activate()
+        self._resize_to_content()
+        self.reposition()
+        self._settle_timer.start()
 
+    def _resize_to_content(self) -> None:
+        """按内容算出该多大并应用（`refit` 与 `_settle` 共用）。"""
         max_width = self._max_width()
-        # 先让应用区按可用宽度决定每行放几个（放不下就换行，而不是被挤扁）
-        inner = max_width - (MIN_MARGIN * 2) - 20
-        self.apps_flow.relayout(inner)
+        # 先让应用区按可用宽度决定每行放几个（放不下就换行，而不是被挤扁）。
+        # 控制按钮现在和图标同处一行，所以要把它们占的宽度先扣掉，
+        # 否则应用区会按"整行都归我"来排，把 ＋ ⚙ ✕ 挤出屏幕外面。
+        inner = max_width - (MIN_MARGIN * 2) - 20 - self._controls_width()
+        self.apps_flow.relayout(max(160, inner))
 
         self.adjustSize()
         width = min(self.sizeHint().width(), max_width)
@@ -395,17 +513,17 @@ class DockBar(QWidget):
         self.setMaximumWidth(max_width)
         self.resize(width, height)
 
-        # 布局可能把窗口撑高（换行之后行数变了），所以按**实际**高度再贴一次底，
-        # 保证底边永远不会掉到屏幕外。
-        self.reposition()
-        self._settle_timer.start()
-
     def _settle(self) -> None:
-        """布局稳定后再校正一次位置。
+        """布局稳定后再校正一次尺寸与位置。
 
-        窗口显示出来之后 Qt 还有可能按布局调整一次尺寸；如果不在那之后再贴底，
-        菜单栏就会有一部分探到屏幕下面去（之前"加完常用项跑到桌面外"的原因）。
+        两个原因：
+        * 窗口显示出来之后，样式表里的字体才真正生效，`DockIcon` 会在它的
+          `showEvent` 里按**真实字宽**重算固定尺寸——也就是说 rebuild 当下算的
+          宽度可能偏小，不再校一次，最后一个图标就会被裁掉一截；
+        * 窗口显示后 Qt 还会按布局再调一次尺寸；不在这之后贴底，
+          菜单栏就会有一部分探到屏幕下面去（之前"加完常用项跑到桌面外"的原因）。
         """
+        self._resize_to_content()
         self.reposition()
 
     def hide_self(self) -> None:
@@ -463,7 +581,15 @@ class DockBar(QWidget):
             self.setToolTip(f"{path.name}：{reason}")
             QTimer.singleShot(4000, lambda: self.setToolTip(""))
 
-    def _quick_menu(self, button, entry: dict) -> None:
+    def _quick_menu(self, button, entry: dict, pos=None) -> None:
+        """常用启动图标的右键菜单。
+
+        ⚠️ 这里**必须接收 pos**。`DockIcon.context_requested` 的签名是
+        `(self, globalPos)`，而连接处写的是 `lambda _btn, e=entry, b=button:
+        self._quick_menu(b, e)`（把 pos 丢掉了）。结果 Qt 只传两个参数时
+        还能跑，一旦信号真带位置就会 `TypeError`——右键常用软件崩的就是这里。
+        pos 现在既可以从信号来，也可以缺省（缺省时用鼠标当前位置）。
+        """
         path = Path(entry["path"])
         menu = QMenu(self)
         action_open = menu.addAction("打开")
@@ -474,7 +600,7 @@ class DockBar(QWidget):
         action_down = menu.addAction("右移")
         menu.addSeparator()
         action_remove = menu.addAction("从菜单栏移除")
-        chosen = menu.exec(self.cursor().pos())
+        chosen = popup_menu(menu, pos)
         if chosen is None:
             return
         if chosen is action_open:
@@ -494,13 +620,16 @@ class DockBar(QWidget):
                     break
 
     def _show_add_menu(self) -> None:
-        from qt_compat import QFileDialog, QInputDialog
+        from qt_compat import QFileDialog
 
         menu = QMenu(self)
-        action_from_list = menu.addAction("从收纳内容里选…")
+        action_from_list = menu.addAction("从收纳内容里选…（可多选）")
         action_file = menu.addAction("浏览文件…")
-        chosen = menu.exec(self.add_btn.mapToGlobal(QPoint(0, -6)))
+        chosen = popup_menu(menu, self.add_btn.mapToGlobal(QPoint(0, -6)))
         if chosen is None:
+            return
+        if chosen is action_from_list:
+            self.add_quick_dialog()
             return
         if chosen is action_file:
             path, _filter = QFileDialog.getOpenFileName(
@@ -511,24 +640,74 @@ class DockBar(QWidget):
                 if self.cfg.add_quick(target, target.stem):
                     self.quick_changed.emit()
                     self.rebuild()
+
+    # ------------------------------------------------------------------
+    # 常用启动：批量添加 / 批量删除
+    # ------------------------------------------------------------------
+    def _quick_display_name(self, path: Path) -> str:
+        show_ext = bool(self.cfg.get("show_extensions", False))
+        return engine.display_name(path.name, False, show_ext)
+
+    def _ask_multi(self, title: str, hint: str,
+                   entries: "list[tuple[str, str]]", confirm_text: str):
+        """弹多选列表。
+
+        单独抽成方法是为了测试时可注入（原因见 desktop_browser 的同名方法：
+        `from widgets import multi_pick` 是按值导入的，改源头不生效）。
+        """
+        return multi_pick(title, hint, entries, confirm_text, self)
+
+    def add_quick_dialog(self) -> None:
+        """从收纳内容里勾选多项，批量加到菜单栏。"""
+        items = self._items
+        if not items:
+            QMessageBox.information(
+                self, "加为常用启动",
+                "还不知道收纳目录里有什么。\n等扫描完成，或先用「浏览文件…」挑一个程序。")
             return
-        if chosen is action_from_list:
-            items = self._items
-            if not items:
-                return
-            show_ext = bool(self.cfg.get("show_extensions", False))
-            names = [engine.display_name(i.name, i.is_dir, show_ext) for i in items]
-            if len(set(names)) != len(names):
-                # 剥掉后缀后重名了（报告.docx / 报告.txt）→ 退回完整名，别让人选错
-                names = [i.name for i in items]
-            name, ok = QInputDialog.getItem(self, "加为常用", "选择要固定的项目：",
-                                            names, 0, False)
-            if ok and name:
-                item = items[names.index(name)]
-                if self.cfg.add_quick(item.path,
-                                      item.path.stem if item.path.suffix else item.name):
-                    self.quick_changed.emit()
-                    self.rebuild()
+        candidates = [i for i in items if not self.cfg.is_quick(i.path)]
+        if not candidates:
+            QMessageBox.information(self, "加为常用启动",
+                                    "收纳内容里的项目都已经在菜单栏上了。")
+            return
+        entries = [(str(i.path), self._quick_display_name(i.path))
+                   for i in candidates]
+        chosen = self._ask_multi(
+            "批量加到菜单栏",
+            f"勾选要固定到菜单栏的项目（共 {len(entries)} 项可选）：",
+            entries, "加入")
+        if not chosen:
+            return
+        by_key = {str(i.path): i for i in candidates}
+        added = self.cfg.add_quick_many(
+            [(p, self._quick_display_name(by_key[p].path))
+             for p in chosen if p in by_key])
+        self.quick_changed.emit()
+        self.rebuild()
+        if added:
+            self.setToolTip(f"已加入 {added} 项")
+
+    def remove_quick_dialog(self) -> None:
+        """勾选多项，批量从菜单栏移除。"""
+        entries_cfg = self.cfg.quick_items
+        if not entries_cfg:
+            QMessageBox.information(self, "移除常用启动", "菜单栏上还没有常用启动项。")
+            return
+        entries = [(e["path"], e["name"] or Path(e["path"]).name)
+                   for e in entries_cfg]
+        chosen = self._ask_multi(
+            "批量移除常用启动",
+            f"勾选要从菜单栏移出的项目（共 {len(entries)} 项）：\n"
+            "只影响菜单栏这一排，不会动到文件本身。",
+            entries, "移除")
+        if not chosen:
+            return
+        removed = self.cfg.remove_quick_many(chosen)
+        # 先自己重建，再发信号让主程序同步其它界面——顺序反了会读到中间态
+        self.rebuild()
+        self.quick_changed.emit()
+        if removed:
+            self.setToolTip(f"已移除 {removed} 项")
 
     # ------------------------------------------------------------------
     # 主题 / 尺寸
@@ -642,7 +821,7 @@ class DockBar(QWidget):
         action_hide = menu.addAction("暂时隐藏菜单栏")
         action_quit = menu.addAction("退出程序（并还原桌面）")
 
-        chosen = menu.exec(event.globalPos())
+        chosen = popup_menu(menu, event)
         if chosen is None:
             return
         if chosen is action_files:

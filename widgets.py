@@ -13,8 +13,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from qt_compat import (
-    QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPalette, QPixmap,
-    QRect, Qt, QTimer, QWidget, Signal,
+    QCheckBox, QColor, QDialog, QFont, QHBoxLayout, QIcon, QImage, QLabel,
+    QPainter, QPainterPath, QPalette, QPixmap, QPushButton, QRect,
+    QScrollArea, Qt, QTimer, QVBoxLayout, QWidget, Signal,
 )
 
 import acrylic
@@ -340,3 +341,117 @@ class GlassCardMixin:
         # SetWindowRgn 不会跟着窗口缩放，尺寸一变就得重新裁一次
         if self._glass_mode:
             acrylic.apply_round_region(self, theme.GLASS_RADIUS)
+
+
+class MultiPickDialog(QDialog):
+    """带**复选框**的多选列表弹窗（批量加 / 批量删常用软件共用）。
+
+    需求原话是「按下从下面列表中选择按钮后，下方软件列表增加复选框，
+    支持多选批量添加」——所以这里不走"按住 Ctrl 点选"那套，而是每行一个
+    复选框，点一下就是勾选/取消，多选零门槛。
+
+    设计要点：
+    * 每行一个 `QCheckBox`，直接摆进滚动区，而不是用 QListWidget 的
+      `setCheckState`——后者在部分主题下复选框会被样式表吃掉，看不见。
+    * 顶部有「全选 / 全不选」，底部实时显示"已选 N 项"并据此启用确认按钮。
+    * `chosen` 返回被勾选条目的 `key` 列表；取消返回空列表。
+    """
+
+    def __init__(self, title: str, hint: str, entries: "list[tuple[str, str]]",
+                 confirm_text: str = "确定", parent=None):
+        """entries 是 `[(key, 显示文本), ...]`。"""
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.resize(520, 560)
+        self._boxes: "list[tuple[str, QCheckBox]]" = []
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 16, 18, 16)
+        root.setSpacing(10)
+
+        head = QLabel(hint)
+        head.setWordWrap(True)
+        root.addWidget(head)
+
+        # ---- 全选 / 全不选 ----
+        tools = QHBoxLayout()
+        btn_all = QPushButton("全选")
+        btn_none = QPushButton("全不选")
+        btn_all.clicked.connect(lambda: self._set_all(True))
+        btn_none.clicked.connect(lambda: self._set_all(False))
+        tools.addWidget(btn_all)
+        tools.addWidget(btn_none)
+        tools.addStretch(1)
+        self.count_label = QLabel("")
+        tools.addWidget(self.count_label)
+        root.addLayout(tools)
+
+        # ---- 复选框列表（滚动）----
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        host = QWidget()
+        box = QVBoxLayout(host)
+        box.setContentsMargins(4, 4, 4, 4)
+        box.setSpacing(2)
+        for key, text in entries:
+            check = QCheckBox(text)
+            check.stateChanged.connect(lambda _s: self._update_count())
+            box.addWidget(check)
+            self._boxes.append((key, check))
+        if not entries:
+            empty = QLabel("没有可选的条目。")
+            box.addWidget(empty)
+        box.addStretch(1)
+        scroll.setWidget(host)
+        root.addWidget(scroll, 1)
+
+        # ---- 底部按钮 ----
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        btn_cancel = QPushButton("取消")
+        btn_cancel.clicked.connect(self.reject)
+        self.btn_ok = QPushButton(confirm_text)
+        self.btn_ok.setDefault(True)
+        self.btn_ok.clicked.connect(self.accept)
+        footer.addWidget(btn_cancel)
+        footer.addWidget(self.btn_ok)
+        root.addLayout(footer)
+
+        self._update_count()
+
+    def _set_all(self, value: bool) -> None:
+        for _key, check in self._boxes:
+            check.setChecked(value)
+
+    def _update_count(self) -> None:
+        chosen = self.chosen()
+        self.count_label.setText(f"已选 {len(chosen)} 项")
+        self.btn_ok.setEnabled(bool(chosen))
+
+    def chosen(self) -> "list[str]":
+        """被勾选条目的 key 列表（保持列表里的原顺序）。"""
+        return [key for key, check in self._boxes if check.isChecked()]
+
+    def check_keys(self) -> "list[str]":
+        """测试用：当前所有可选项的 key。"""
+        return [key for key, _check in self._boxes]
+
+
+def multi_pick(title: str, hint: str, entries: "list[tuple[str, str]]",
+               confirm_text: str = "确定", parent=None) -> "list[str]":
+    """弹出多选列表，返回被勾选的 key（取消或没选返回空列表）。
+
+    这个函数刻意做成"永不抛异常"：界面上的批量操作不该因为弹窗出问题而崩，
+    真出问题就当作"用户什么都没选"。
+    """
+    try:
+        dialog = MultiPickDialog(title, hint, entries, confirm_text, parent)
+        if dialog.exec():
+            return dialog.chosen()
+    except Exception as exc:  # noqa: BLE001
+        try:
+            config.log(f"多选弹窗失败：{type(exc).__name__}: {exc}")
+        except Exception:
+            pass
+    return []

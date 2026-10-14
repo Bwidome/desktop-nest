@@ -477,9 +477,15 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
 #VerticalDivider {{ background: {c['border']}; max-width: 1px; min-width: 1px; border: none; }}
 
 /* ---------- 底部菜单栏（Dock） ---------- */
+/* 需求：菜单栏做成**纯透明**——只留「桌面整理」控件和常用软件的图标浮在桌面上，
+   不要那条深色圆角底板。窗口本身已经开了 `WA_TranslucentBackground`，
+   所以这里把底和边框都去掉，透出来的就是真实的桌面。
+   代价：图标底下没有暗色托着，浅色壁纸上的浅色元素会看不见。所以
+   悬停底色 / 控制按钮统一改用**中性半透明灰**（对浅色和深色壁纸都辨得出来），
+   而不是纯白（浅壁纸上消失）或纯黑（深壁纸上消失）。 */
 #DockSurface {{
-    background: rgba(28, 30, 36, 235);
-    border: 1px solid rgba(255, 255, 255, 30);
+    background: transparent;
+    border: none;
     border-radius: 18px;
 }}
 #DockIcon {{
@@ -487,42 +493,50 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
     border: 1px solid transparent;
     border-radius: 12px;
     padding: 0px;
+    /* 底板透明之后，图标下面的名字要自己扛住可读性。
+       绝大多数桌面壁纸是中到深的，所以用浅色字；再深就靠 tooltip。 */
+    color: #EAF0FA;
 }}
 #DockIcon:hover {{
-    background: rgba(255, 255, 255, 34);
-    border-color: rgba(255, 255, 255, 48);
+    background: rgba(84, 90, 104, 0.42);
+    border-color: rgba(255, 255, 255, 60);
 }}
 #DockIcon:pressed {{
-    background: rgba(255, 255, 255, 60);
+    background: rgba(84, 90, 104, 0.62);
 }}
 #DockNav {{
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: 8px;
-    color: #E9EBEF;
+    background: rgba(52, 56, 66, 0.34);
+    border: 1px solid rgba(255, 255, 255, 40);
+    border-radius: 9px;
+    color: #F2F4F8;
     font-size: 9pt;
 }}
-#DockNav:hover {{ background: rgba(255, 255, 255, 40); }}
-#DockNav:disabled {{ color: rgba(233, 235, 239, 70); }}
+#DockNav:hover {{ background: rgba(52, 56, 66, 0.62); border-color: rgba(255, 255, 255, 90); }}
+#DockNav:disabled {{ color: rgba(242, 244, 248, 90); background: rgba(52, 56, 66, 0.16); }}
 #DockDivider {{
-    background: rgba(255, 255, 255, 48);
+    background: rgba(140, 146, 158, 0.45);
     border: none;
     margin-top: 8px;
     margin-bottom: 8px;
     margin-left: 5px;
     margin-right: 5px;
 }}
-#DockAdd {{
-    background: rgba(255, 255, 255, 26);
-    border: 1px dashed rgba(255, 255, 255, 80);
+#DockAdd, #DockDel {{
+    background: rgba(52, 56, 66, 0.34);
+    border: 1px dashed rgba(255, 255, 255, 90);
     border-radius: 10px;
-    color: #E9EBEF;
+    color: #F2F4F8;
     font-size: 11.25pt;
     font-weight: 600;
 }}
-#DockAdd:hover {{
-    background: rgba(255, 255, 255, 52);
-    border-color: rgba(255, 255, 255, 130);
+#DockAdd:hover, #DockDel:hover {{
+    background: rgba(52, 56, 66, 0.62);
+    border-color: rgba(255, 255, 255, 150);
+}}
+#DockAdd:disabled, #DockDel:disabled {{
+    color: rgba(242, 244, 248, 90);
+    background: rgba(52, 56, 66, 0.16);
+    border-color: rgba(255, 255, 255, 40);
 }}
 
 /* ---------- 常用启动小快捷方式（图标+名称） ---------- */

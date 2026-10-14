@@ -102,7 +102,22 @@ def main() -> int:
     from dock import DockBar
     from panel import MainPanel
 
-    cfg = config_mod.Config(str(base / "config.json"))
+    # 注意这里传的是**目录**：Config 自己会拼 `config.json`。
+    # 传成 `.../config.json` 的话它会当成目录再拼一层，配置就永远写不出去。
+    cfg = config_mod.Config(str(base))
+
+    # 菜单栏上摆几个常用启动，好让"纯透明底板 + 图标浮在桌面上"看得出来。
+    # 路径要真实存在，否则取不到图标、只剩占位字母块。
+    quick = []
+    for exe, name in ((r"C:\Windows\System32\notepad.exe", "记事本"),
+                      (r"C:\Windows\explorer.exe", "文件资源管理器"),
+                      (r"C:\Windows\System32\mspaint.exe", "画图"),
+                      (r"C:\Windows\System32\calc.exe", "计算器")):
+        if Path(exe).exists():
+            quick.append({"path": exe, "name": name})
+    cfg.update({"quick_items": quick})
+    print(f"菜单栏常用启动：{[e['name'] for e in quick]}")
+
     items = []
     for name, kind, size in (("季度报告.docx", "file", 240_000),
                              ("预算表.xlsx", "file", 88_000),
