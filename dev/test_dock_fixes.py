@@ -14,12 +14,13 @@
 8. 打开 / 反复翻页收纳面板时，底部菜单栏不会无故消失
 9. 菜单栏底板是**纯透明**的，而且只有一行（图标与控制按钮同一水平线）
 10. 菜单栏图标按钮要装得下自己的文字（高 DPI 下别叠字）
-11. 还没加常用软件时，「＋」左边不该有空隙（分隔线不该无条件插）
+11. 应用区里不该有"空白占位格"（入口和常用项之间不再插分隔线）
 12. 整条菜单栏可以用鼠标拖动（空白处 + 图标上快速拖都行）
 13. 点开软件之后，图标上的高光要跟着消失（不能一直亮着）
 14. 长按鼠标左键可以拖动排序常用软件（有插入指示线，结果写回配置）
 15. 菜单栏图标要用 256×256 的高清原图（旧路径只有 32×32）
 16. Config.move_to：把任意一项挪到任意位置
+17. 收纳面板的图标也走 256×256 高清（网格 + 常用启动行）
 
 用法：python dev/test_dock_fixes.py
 """
@@ -267,20 +268,21 @@ def main() -> int:
         work_h = info.rcWork.bottom - info.rcWork.top
 
         # 这里必须**按实现里的三条规则复算期望值**，不能凭一个面积阈值猜。
-        # 原来写的是 `coverage < 0.4`，跟实现的 `>= 0.80 且高度 >= 90% 工作区`
-        # 不一致：前台窗口占比落在 40%~80% 时，测试必然误报失败。
+        #
+        # ⚠️ 曾经这里复算的是"窗口矩形盖住了菜单栏那一带 → 让开"，
+        # 那是**更早版本**的判据；实现后来把它删掉了（普通窗口拖到屏幕底部、
+        # 窗口打开动画的中间帧都会短暂满足它，结果菜单栏疯狂闪烁），
+        # 换成了"宽度也得占够"。测试没跟着改，于是前台窗口占比落在
+        # 40%~80% 且恰好压住菜单栏时，这条用例必然误报失败。
         coverage = (win_w * win_h) / float(work_w * work_h) if work_w and work_h else 0
         expected = False
         if win_w >= mon_w * 0.96 and win_h >= mon_h * 0.96:
             expected = True                       # 规则 1：真全屏，铺满整块显示器
         elif coverage >= 0.80 and win_h >= work_h * 0.90:
             expected = True                       # 规则 2：最大化（按面积占比）
-        elif tray.dock.isVisible():               # 规则 3：盖住菜单栏所在那一带
-            dock_rect = tray.dock.geometry()
-            if (rect.left <= dock_rect.left() and rect.right >= dock_rect.right()
-                    and rect.bottom >= dock_rect.top()):
-                expected = True
-        if tray._foreground_is_self():            # 自己的窗口不算（新增的排除项）
+        elif win_w >= mon_w * 0.98 and win_h >= work_h * 0.94:
+            expected = True                       # 规则 3：接近满宽的窗口
+        if tray._foreground_is_self():            # 自己的窗口不算
             expected = False
         if tray._desktop_is_foreground():         # 桌面本身在前台不算
             expected = False
@@ -516,7 +518,10 @@ def main() -> int:
           f"窗口 w={dock.width()} | apps_flow w={dock.apps_flow.width()} "
           f"items={dock.apps_flow.item_count()} cols={dock.apps_flow._columns}")
 
-    # 有常用项时分隔线要回来（图标和入口之间需要一点视觉区分）
+    # 加了常用项之后**依然没有分隔线**：应用区里只有「桌面整理」+ 常用项。
+    # 根因是应用区按**等宽网格**排（`unit_size()` 取所有条目里最大的那个），
+    # 那根 1px 的竖线也会占满一整格（≈ 一个图标的宽度），看上去就是一块
+    # "空白占位格子"——用户圈出来要删的正是它。
     quick_sources = [i for i in tray.nest_items if i.kind == "shortcut"][:4]
     check("有足够的快捷方式来做常用项（≥3 个）", len(quick_sources) >= 3,
           str(len(quick_sources)))
@@ -524,9 +529,20 @@ def main() -> int:
         cfg.add_quick(source_item.path, source_item.name)
     rebuild_dock()
     wait_until(lambda: len(dock._app_buttons) == len(quick_sources), 5)
-    check("加了常用项之后分隔线会回来",
-          dock.apps_flow.item_count() == len(quick_sources) + 2,
-          f"{dock.apps_flow.item_count()} vs {len(quick_sources) + 2}")
+    check("加了常用项之后也没有多出占位格（入口 + 常用项，一个不多）",
+          dock.apps_flow.item_count() == len(quick_sources) + 1,
+          f"{dock.apps_flow.item_count()} vs {len(quick_sources) + 1}")
+    # 关键：入口和第一个常用项之间只隔"一点点"，绝不能是一整格的宽度
+    # （一整格 ≈ 一个图标宽，那正是"空白占位格子"的样子）。
+    first_app = dock._app_buttons[0]
+    entry_right = (dock.desktop_btn.mapTo(dock, QPoint(0, 0)).x()
+                   + dock.desktop_btn.width())
+    first_left = first_app.mapTo(dock, QPoint(0, 0)).x()
+    entry_gap = first_left - entry_right
+    unit_w = dock.apps_flow.unit_size().width()
+    check(f"入口与第一个常用项之间只有一点间距（{entry_gap}px，远小于一格 {unit_w}px）",
+          0 <= entry_gap < unit_w * 0.5,
+          f"{entry_gap}px vs unit {unit_w}px")
     check("主行里的弹性占位项没有越积越多（重建会清掉旧的）",
           sum(1 for i in range(dock.main_row.count())
               if dock.main_row.itemAt(i).spacerItem() is not None) == 1,
@@ -716,6 +732,31 @@ def main() -> int:
           and [e["name"] for e in cfg.quick_items] == ["D", "B", "C", "A"],
           str([e["name"] for e in cfg.quick_items]))
     check("非法来源下标返回 False", cfg.move_to(9, 0) is False)
+
+    print()
+    print("── 17. 收纳面板的图标也走 256×256 高清 ──")
+    browser = tray.desktop_browser
+    # 第 16 节把常用项换成了 A/B/C/D 这种假路径，先装回真实的
+    cfg.set("quick_items", [{"path": str(i.path), "name": i.name}
+                            for i in quick_sources])
+    # 清掉 loader 的缓存与队列，逼它把取图请求**重新排一遍**，
+    # 这样才看得到"请求里到底带没带高清标记"（命中缓存时会直接跳过）。
+    browser.loader._timer.stop()
+    browser.loader._queue.clear()
+    browser.loader._cache.clear()
+    browser.set_items(tray.nest_items)
+    queued = list(browser.loader._queue)
+    check("收纳面板重新取图时确实排了活", len(queued) > 0, str(len(queued)))
+    check("收纳面板的取图请求**全部**带高清标记（网格 + 常用启动行）",
+          bool(queued) and all(item[-1] is True for item in queued),
+          f"hi_res 标记集合：{sorted({item[-1] for item in queued})}")
+    # 网格图标要显示 48px、常用启动行 34px，都超过旧路径的 32×32 上限，
+    # 所以两处都必须走 get_icon_best()，钉住别再退回 32px 档。
+    check("收纳面板请求的尺寸确实超过旧路径上限（>32）",
+          all(item[3] > 32 for item in queued),
+          str(sorted({item[3] for item in queued})))
+    browser.loader._timer.stop()
+    browser.loader._queue.clear()
 
     print()
     print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")

@@ -440,8 +440,11 @@ class DesktopBrowser(GlassCardMixin, QWidget):
             if cached_icon is not None:
                 button.setIcon(cached_icon)
             else:
+                # hi_res=True：这一排要显示 APP_ICON(34px) 的图标，
+                # 而 SHGetFileInfoW 顶天只给 32×32，硬拉到 34 就糊了。
+                # 走 get_icon_best() 拿 256×256 原图再由 Qt 缩下来。
                 self.loader.request(key, path, icon_hint_for(path),
-                                     ICON_REQUEST, name)
+                                     ICON_REQUEST, name, hi_res=True)
 
         self.btn_add_app = QToolButton(self.apps_host)
         self.btn_add_app.setObjectName("AppAdd")
@@ -659,7 +662,10 @@ class DesktopBrowser(GlassCardMixin, QWidget):
             if cached_icon is not None:
                 tile.set_icon(cached_icon)
             else:
-                self.loader.request(key, item.path, hint, ICON_REQUEST, item.name)
+                # 网格里的图标显示 GRID_ICON(48px)，比 32×32 的 LARGEICON 大，
+                # 不开 hi_res 就是硬放大 → 糊。这里和菜单栏用同一套 256px 原图。
+                self.loader.request(key, item.path, hint, ICON_REQUEST, item.name,
+                                    hi_res=True)
 
         total_cells = ((len(page_items) + columns - 1) // columns) * columns
         for index in range(len(page_items), total_cells):

@@ -523,14 +523,6 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
 }}
 #DockNav:hover {{ background: rgba(52, 56, 66, 0.62); border-color: rgba(255, 255, 255, 90); }}
 #DockNav:disabled {{ color: rgba(242, 244, 248, 90); background: rgba(52, 56, 66, 0.16); }}
-#DockDivider {{
-    background: rgba(140, 146, 158, 0.45);
-    border: none;
-    margin-top: 8px;
-    margin-bottom: 8px;
-    margin-left: 5px;
-    margin-right: 5px;
-}}
 #DockAdd, #DockDel {{
     background: rgba(52, 56, 66, 0.34);
     border: 1px dashed rgba(255, 255, 255, 90);

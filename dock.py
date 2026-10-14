@@ -254,6 +254,8 @@ class DockIcon(QToolButton):
         super().__init__(parent)
         self.icon_size = icon_size
         self._show_text = show_text
+        # 由 DockBar 抬高，用来跟同一行里的按钮对齐（见 set_min_width）。
+        self._min_width = 0
         self.setObjectName("DockIcon")
         self.setAutoRaise(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -298,10 +300,23 @@ class DockIcon(QToolButton):
         """
         self.ensurePolished()
         if not self._show_text:
-            self.setFixedSize(self.icon_size + 14, self.icon_size + 14)
+            self.setFixedSize(max(self.icon_size + 14, self._min_width),
+                              self.icon_size + 14)
             return
         text_width = QFontMetrics(self.font()).horizontalAdvance(self.text() or "")
-        self.setFixedSize(max(self.icon_size + 20, text_width + 14), self.icon_size + 26)
+        self.setFixedSize(max(self.icon_size + 20, text_width + 14, self._min_width),
+                          self.icon_size + 26)
+
+    def set_min_width(self, width: int) -> None:
+        """把"最小宽度"抬高，用来和同一行里的其他按钮对齐。
+
+        应用区是**等宽网格**（`FlowLayout.unit_size()` 取所有条目里最大的那个
+        当格子宽）。「桌面整理」入口没有文字、比常用项按钮窄，不抬的话
+        它右边就会空出一截——看上去正好是一块"空白占位格子"。
+        抬到和常用项一样宽之后，两者之间就只剩布局自身的一个 spacing。
+        """
+        self._min_width = max(0, int(width))
+        self._refit()
 
     def setText(self, text: str) -> None:  # noqa: N802
         super().setText(text)
@@ -372,7 +387,7 @@ class DockBar(QWidget):
                               or DEFAULT_ICON_SIZE)
         self._drag_offset = None
         self._buttons: "list[DockIcon]" = []
-        # 常用启动的按钮，**顺序与 cfg.quick_items 一一对应**（不含「桌面整理」和分隔线）。
+        # 常用启动的按钮，**顺序与 cfg.quick_items 一一对应**（不含「桌面整理」入口）。
         # 拖动排序全靠它算目标槽位。
         self._app_buttons: "list[DockIcon]" = []
         # 收纳目录内容：不再显示在菜单栏上，只作为「＋ → 从收纳内容里选…」的候选
@@ -503,12 +518,6 @@ class DockBar(QWidget):
         return (sum(b.width() for b in self._control_buttons)
                 + gap * (len(self._control_buttons) + 1))
 
-    def _divider(self) -> QFrame:
-        line = QFrame(self.surface)
-        line.setObjectName("DockDivider")
-        line.setFixedWidth(1)
-        return line
-
     def _build_apps(self) -> None:
         """把「桌面整理」入口和常用启动图标填进可换行的应用区。"""
         # ---- 第一个控件：桌面整理 ----
@@ -522,14 +531,12 @@ class DockBar(QWidget):
         )
         self.apps_flow.add_item(self.desktop_btn)
 
-        # 分隔线**只在真有常用项时才插**。
-        # 以前是无条件插一根，于是"还没加任何常用软件"时，＋ 左边就凭空多出
-        # 1px 线 + 左右各 5px margin + 两侧 3px 间距 ≈ 17px 的空隙——
-        # 用户看到的就是图一那个莫名其妙的空档。
-        if self.cfg.quick_items:
-            separator = self._divider()
-            separator.setFixedHeight(self._icon_size + 10)
-            self.apps_flow.add_item(separator)
+        # ⚠️ 这里**不再插分隔线**。
+        # 应用区是等宽网格（`FlowLayout.unit_size()` 取所有条目里最大的那个），
+        # 所以那根 1px 的竖线也会**占满一整格**（≈ 一个图标的宽度），
+        # 「桌面整理」入口和第一个常用软件之间就凭空多出一块空白格——
+        # 用户圈出来要删的"空白占位格子"正是它。
+        # 现在两类图标只隔布局自身的一个 spacing，没有多余的空档。
 
         # ---- 常用启动 ----
         for entry in self.cfg.quick_items:
@@ -561,6 +568,24 @@ class DockBar(QWidget):
                 lambda _btn, pos, e=entry, b=button: self._quick_menu(b, e, pos))
             self.apps_flow.add_item(button)
             self._app_buttons.append(button)
+
+        # 初次对齐。字体在窗口显示出来之后才真正生效、按钮宽度会变，
+        # 所以 `_resize_to_content()` 每次还会再校一次（见 `_align_desktop_button`）。
+        self._align_desktop_button()
+
+    def _align_desktop_button(self) -> None:
+        """把「桌面整理」入口抬到和常用项按钮一样宽。
+
+        应用区是**等宽网格**：入口没有文字、比常用项按钮窄，不抬的话
+        它右边会空出一截（用户圈出来要删的"空白占位格子"的一半原因）。
+        抬齐之后，入口和第一个常用项之间就只剩布局自身的一个 spacing，
+        两边的图标也正好左右对齐。
+        """
+        if not self._app_buttons or getattr(self, "desktop_btn", None) is None:
+            return
+        widest = max(self.apps_flow._effective_size(b).width()      # noqa: SLF001
+                     for b in self._app_buttons)
+        self.desktop_btn.set_min_width(widest)
 
     # ------------------------------------------------------------------
     # 内容
@@ -647,6 +672,9 @@ class DockBar(QWidget):
     def _resize_to_content(self) -> None:
         """按内容算出该多大并应用（`refit` 与 `_settle` 共用）。"""
         max_width = self._max_width()
+        # 入口要和常用项按钮一样宽。字体是窗口显示之后才真正生效的，
+        # 按钮宽度会跟着变，所以每次重算尺寸前都再对齐一次（幂等）。
+        self._align_desktop_button()
         # 先让应用区按可用宽度决定每行放几个（放不下就换行，而不是被挤扁）。
         # 控制按钮现在和图标同处一行，所以要把它们占的宽度先扣掉，
         # 否则应用区会按"整行都归我"来排，把 ＋ ⚙ ✕ 挤出屏幕外面。
@@ -1045,7 +1073,7 @@ class DockBar(QWidget):
         # mode == "" → 什么都没发生，按钮自己会按"点击"处理
 
     def _app_index(self, button: DockIcon) -> int:
-        """按钮在**常用软件**里的下标（不含「桌面整理」和分隔线）；不在里面返回 -1。"""
+        """按钮在**常用软件**里的下标（不含「桌面整理」入口）；不在里面返回 -1。"""
         try:
             return self._app_buttons.index(button)
         except ValueError:
