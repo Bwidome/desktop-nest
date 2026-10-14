@@ -9,6 +9,14 @@
 做法：直接向 Windows Shell 要图标（`SHGetFileInfoW`）。
 Shell 内部会自己解析 .lnk、.url、.exe 的资源段、文件类型关联，比手写解析可靠得多。
 
+**两档取法**，按清晰度需求挑：
+
+* `get_icon()`      —— `SHGetFileInfoW` 的 LARGEICON / SMALLICON，最大 32×32。
+                       清单、列表这类小图标够用，也最省内存（几百个条目一起取）。
+* `get_icon_best()` —— `SHGetImageList(SHIL_JUMBO)` 拿 **256×256**，
+                       再交给 Qt 平滑缩到显示尺寸。菜单栏那种"图标要放大显示"
+                       的地方必须走这条，否则就是把 32×32 硬拉大，一片糊。
+
 因为图标要在后台线程里取（避免几百个文件卡住界面），这里只负责产出
 「原始像素 + 尺寸」这种纯数据，转成 Qt 图片的事情交给界面线程做。
 """
@@ -31,6 +39,21 @@ SHGFI_LARGEICON = 0x000000000
 SHGFI_SMALLICON = 0x000000001
 SHGFI_USEFILEATTRIBUTES = 0x000000010
 SHGFI_SHELLICONSIZE = 0x000000004
+SHGFI_SYSICONINDEX = 0x00004000
+
+# 系统图像列表（SHGetImageList）的尺寸编号
+SHIL_LARGE = 0            # 32×32
+SHIL_SMALL = 1            # 16×16
+SHIL_EXTRALARGE = 2       # 48×48
+SHIL_SYSSMALL = 3
+SHIL_JUMBO = 4            # 256×256 —— 菜单栏要的就是这张
+ILD_TRANSPARENT = 0x00000001
+
+# IImageList 的 IID（`{46EB5926-...}` 是 shell 公布的稳定值，不要改）
+IID_IIMAGE_LIST = "{46EB5926-582E-4017-9FDF-E8998DAA0950}"
+
+# 菜单栏图标的目标边长：先拿 256×256 的原图，再由 Qt 平滑缩到显示尺寸
+JUMBO_SIZE = 256
 
 FILE_ATTRIBUTE_NORMAL = 0x80
 FILE_ATTRIBUTE_DIRECTORY = 0x10
@@ -92,6 +115,13 @@ class _BITMAPINFOHEADER(ctypes.Structure):
 
 class _BITMAPINFO(ctypes.Structure):
     _fields_ = [("bmiHeader", _BITMAPINFOHEADER), ("bmiColors", ctypes.c_uint * 3)]
+
+
+class _GUID(ctypes.Structure):
+    """COM 的 GUID（只用来承载 IImageList 的 IID）。"""
+
+    _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort),
+                ("Data3", ctypes.c_ushort), ("Data4", ctypes.c_ubyte * 8)]
 
 
 @dataclass(frozen=True)
@@ -268,6 +298,81 @@ def _extract_exe_icon(exe: Path, size: int) -> "RawIcon | None":
 
 
 # --------------------------------------------------------------------------
+# 高清图标：系统图像列表里的 256×256（jumbo）
+# --------------------------------------------------------------------------
+def _system_icon_index(path: Path) -> "int | None":
+    """问 Shell 要这个条目的图标**编号**（而不是图标本身）。
+
+    `SHGFI_SYSICONINDEX` 返回的编号是"系统图像列表"里的下标，
+    同一份编号在 16 / 32 / 48 / 256 各张列表里指的是**同一个图标**，
+    所以拿它去 jumbo 列表里取，就能得到同一张图的 256×256 版本。
+    """
+    if not IS_WINDOWS:
+        return None
+    info = _SHFILEINFOW()
+    result = ctypes.windll.shell32.SHGetFileInfoW(
+        str(path), 0, ctypes.byref(info), ctypes.sizeof(info), SHGFI_SYSICONINDEX)
+    if not result:
+        return None
+    return int(info.iIcon)
+
+
+def _image_list_icon(index: int, shil: int = SHIL_JUMBO) -> "RawIcon | None":
+    """从系统图像列表里按下标取指定尺寸的图标（默认 jumbo = 256×256）。
+
+    这里要手工走一次 COM 虚表，因为 ctypes 没有 IImageList 的现成绑定：
+        [2]  Release()
+        [10] GetIcon(int i, UINT flags, HICON *phicon)
+    取到的 HICON 交给 `_hicon_to_raw` 转像素（它会顺手 DestroyIcon，不漏 GDI 句柄）。
+    """
+    if not IS_WINDOWS:
+        return None
+    shell32 = ctypes.windll.shell32
+    if not hasattr(shell32, "SHGetImageList"):
+        return None                      # XP 时代的系统没有这个导出
+    try:
+        iid = _GUID()
+        ctypes.oledll.ole32.CLSIDFromString(IID_IIMAGE_LIST, ctypes.byref(iid))
+        image_list = ctypes.c_void_p()
+        if shell32.SHGetImageList(shil, ctypes.byref(iid),
+                                  ctypes.byref(image_list)) != 0 or not image_list:
+            return None
+    except Exception:
+        return None
+
+    try:
+        vtbl = ctypes.cast(image_list,
+                           ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+        get_icon = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_int,
+                                      ctypes.c_uint,
+                                      ctypes.POINTER(ctypes.c_void_p))(vtbl[10])
+        hicon = ctypes.c_void_p()
+        if get_icon(image_list, int(index), ILD_TRANSPARENT,
+                    ctypes.byref(hicon)) != 0 or not hicon:
+            return None
+        return _hicon_to_raw(int(hicon.value))
+    except Exception:
+        return None
+    finally:
+        # IImageList 是引用计数的，取完图标必须 Release，否则每次调用都漏一个
+        try:
+            release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtbl[2])
+            release(image_list)
+        except Exception:
+            pass
+
+
+def _jumbo_icon(path: Path) -> "RawIcon | None":
+    """取某个条目的 256×256 原图；拿不到返回 None（调用方会退回老路径）。"""
+    if not IS_WINDOWS or not path.exists():
+        return None
+    index = _system_icon_index(path)
+    if index is None:
+        return None
+    return _image_list_icon(index, SHIL_JUMBO)
+
+
+# --------------------------------------------------------------------------
 # 缓存
 # --------------------------------------------------------------------------
 def cache_dir() -> Path:
@@ -373,6 +478,44 @@ def get_icon(path: "Path | str", size: int = 32,
     return raw
 
 
+def get_icon_best(path: "Path | str", size: int = 32,
+                  exe_hint: "Path | None" = None) -> "RawIcon | None":
+    """取**尽可能清晰**的图标：优先 256×256 的 jumbo 原图。
+
+    为什么需要它（"菜单栏图标清晰度太低"的根因）：
+    `SHGetFileInfoW` 只有两档——`SHGFI_LARGEICON` 顶天 **32×32**，
+    `SHGFI_SMALLICON` 是 16×16；`PrivateExtractIconW` 当兜底时也常常只给 32×32。
+    菜单栏图标要显示 44 / 52 甚至更大，等于把 32×32 硬拉大，自然一片糊。
+
+    这里换成 `SHGetImageList(SHIL_JUMBO)` 拿 **256×256**，
+    再让 Qt 平滑缩到显示尺寸（`QIcon` 内部用 `SmoothTransformation`）。
+    缩放这一步交给 Qt 还有个好处：高 DPI 下按物理像素请求也照样清晰。
+
+    拿不到 jumbo（老系统 / 条目不存在）时**静默退回** `get_icon`，
+    行为跟改动前完全一致，不会因为新路径失败而没图标。
+    """
+    path = Path(path)
+    key = icon_key(path, JUMBO_SIZE)
+    cached = _MEMORY.get(key)
+    if cached is not None:
+        return cached
+    on_disk = _try_load_png(key)
+    if on_disk is not None:
+        _MEMORY[key] = on_disk
+        return on_disk
+
+    raw = _jumbo_icon(path)
+    if raw is None and exe_hint is not None:
+        raw = _jumbo_icon(Path(exe_hint))
+    if raw is None or not raw.is_valid() or raw.width < 32:
+        return get_icon(path, size, exe_hint)
+
+    raw = RawIcon(raw.width, raw.height, raw.bgra, key)
+    _MEMORY[key] = raw
+    _save_png(raw)
+    return raw
+
+
 def clear_cache() -> int:
     """清掉磁盘缓存，返回删除的文件数。"""
     removed = 0
@@ -416,7 +559,15 @@ if __name__ == "__main__":
         icon = get_icon(target, 32)
         cost = (time.time() - started) * 1000
         if icon:
-            print(f"  {target.name:<40} {icon.width}x{icon.height} "
+            print(f"  {target.name:<40} 32px 档 {icon.width}x{icon.height} "
                   f"{len(icon.bgra)} bytes  {cost:.0f}ms")
         else:
-            print(f"  {target.name:<40} 取图标失败  {cost:.0f}ms")
+            print(f"  {target.name:<40} 32px 档 取图标失败  {cost:.0f}ms")
+        started = time.time()
+        best = get_icon_best(target, 44)
+        cost = (time.time() - started) * 1000
+        if best:
+            print(f"  {'':<40} 高清档 {best.width}x{best.height} "
+                  f"{len(best.bgra)} bytes  {cost:.0f}ms")
+        else:
+            print(f"  {'':<40} 高清档 取图标失败  {cost:.0f}ms")

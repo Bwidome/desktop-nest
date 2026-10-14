@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-给三张界面拍宣传图
+给四张界面拍宣传图
 =================
-* `shots/panel-main.png` —— 主面板（悬浮磨砂玻璃卡片）
-* `shots/dock.png` —— 底部菜单栏（只有主行，没有分页行）
-* `shots/popup-glass.png` —— 收纳面板（Dock 第一个控件点开的上拉磨砂浮层）+ 底部菜单栏
+* `shots/panel-main.png`    —— 主面板（悬浮磨砂玻璃卡片）
+* `shots/dock.png`          —— 底部菜单栏（只有主行，没有分页行）
+* `shots/dock-reorder.png`  —— 长按拖动排序时的插入指示线
+* `shots/popup-glass.png`   —— 收纳面板（Dock 第一个控件点开的上拉磨砂浮层）+ 底部菜单栏
 
 磨砂玻璃是 **DWM 在合成阶段做的**，Qt 自己 `grab()` 出来的图里没有模糊，
 所以必须：摆一块高对比背景板 → 真把窗口显示出来 → **截整屏** → 裁掉多余部分。
@@ -27,8 +28,9 @@ HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "libs"))
 
-from qt_compat import (QApplication, QColor, QLabel, QLinearGradient, QPainter,
-                       QPixmap, QRadialGradient, QTimer, QWidget, Qt)
+from qt_compat import (QApplication, QColor, QEvent, QLabel, QLinearGradient,
+                       QMouseEvent, QPainter, QPixmap, QPoint, QPointF,
+                       QRadialGradient, QTimer, QWidget, Qt)
 
 BACK_W, BACK_H = 1400, 860
 PANEL_W, PANEL_H = 940, 680
@@ -185,9 +187,52 @@ def main() -> int:
         grab_region(tl.x() * dpr - MARGIN_SMALL, tl.y() * dpr - MARGIN_SMALL,
                     (tl.x() + dock.width()) * dpr + MARGIN_SMALL,
                     (tl.y() + dock.height()) * dpr + BOTTOM_MARGIN, "dock.png")
+        QTimer.singleShot(250, begin_reorder_shot)
+
+    # ---- 第三张：长按拖动排序时的插入指示线 ----
+    def send_mouse(widget, kind, local: "QPoint", glob: "QPoint") -> None:
+        event = QMouseEvent(kind, QPointF(local), QPointF(glob),
+                            Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                            Qt.KeyboardModifier.NoModifier)
+        app.sendEvent(widget, event)
+        app.processEvents()
+
+    def begin_reorder_shot():
+        """按住第一个常用图标，等长按计时器到点，再把光标挪到第三个图标上。"""
+        if len(dock._app_buttons) < 3:
+            QTimer.singleShot(100, shoot_popup)
+            return
+        source = dock._app_buttons[0]
+        local = source.rect().center()
+        glob = source.mapToGlobal(local)
+        send_mouse(source, QEvent.Type.MouseButtonPress, local, glob)
+        # 等长按（DockIcon.HOLD_MS = 320ms）之后再拖
+        QTimer.singleShot(600, lambda: drag_for_shot(source, local, glob))
+
+    def drag_for_shot(source, local, glob):
+        target = dock._app_buttons[2]
+        send_mouse(source, QEvent.Type.MouseMove, local,
+                   target.mapToGlobal(target.rect().center()))
+        QTimer.singleShot(250, capture_reorder)
+
+    def capture_reorder():
+        app.processEvents()
+        dpr = dock.devicePixelRatio() or 1.0
+        tl = dock.mapToGlobal(dock.rect().topLeft())
+        grab_region(tl.x() * dpr - MARGIN_SMALL, tl.y() * dpr - MARGIN_SMALL,
+                    (tl.x() + dock.width()) * dpr + MARGIN_SMALL,
+                    (tl.y() + dock.height()) * dpr + BOTTOM_MARGIN,
+                    "dock-reorder.png")
+        # 收尾：把光标挪回原处再松手 → 目标槽位 == 原槽位，顺序不变，
+        # 这样后面的 popup 截图还是原来的图标顺序。
+        source = dock._app_buttons[0]
+        local = source.rect().center()
+        glob = source.mapToGlobal(local)
+        send_mouse(source, QEvent.Type.MouseMove, local, glob)
+        send_mouse(source, QEvent.Type.MouseButtonRelease, local, glob)
         QTimer.singleShot(300, shoot_popup)
 
-    # ---- 第三张：收纳面板（上拉磨砂浮层）+ 底部菜单栏 ----
+    # ---- 第四张：收纳面板（上拉磨砂浮层）+ 底部菜单栏 ----
     def shoot_popup():
         browser.show_window()
         app.processEvents()

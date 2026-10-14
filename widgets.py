@@ -146,6 +146,30 @@ def pixmap_for(icon: "QIcon", logical_size: int, widget=None) -> "QPixmap":
     return pixmap
 
 
+def clear_hover(widget) -> None:
+    """强制清掉控件当前的 `:hover` 高亮。
+
+    需求："打开软件后菜单栏的高光应该随之消失，而不是一直保持高亮"。
+    点完图标，鼠标**还停在原位**，Qt 不会自己补一个 leave 事件，
+    `WA_UnderMouse` 就一直为真，样式表里 `:hover` 那层底色也就一直亮着——
+    看起来像"卡住了"。
+
+    这里手动把标记清掉，再 unpolish/polish 一遍让样式表重算，
+    高亮立刻消失。鼠标之后移出再移回来，Qt 会重新发 Enter，
+    高亮照常恢复，不影响正常悬停反馈。
+    """
+    try:
+        if not widget.testAttribute(Qt.WidgetAttribute.WA_UnderMouse):
+            return
+        widget.setAttribute(Qt.WidgetAttribute.WA_UnderMouse, False)
+        style = widget.style()
+        style.unpolish(widget)
+        style.polish(widget)
+        widget.update()
+    except Exception:
+        pass
+
+
 def icon_hint_for(path: Path, kind: str = "") -> "Path | None":
     """给 `.lnk` 找出它指向的程序，作为取图标的 hint。
 
@@ -182,19 +206,27 @@ class IconLoader(QWidget):
         self._timer.setInterval(interval)
         self._timer.timeout.connect(self._drain)
         self._cache: "dict[str, QIcon]" = {}
-        self._queue: "list[tuple[str, Path, Path | None, int, str]]" = []
+        # (key, path, exe_hint, size, fallback_text, hi_res)
+        self._queue: "list[tuple[str, Path, Path | None, int, str, bool]]" = []
 
     def cached(self, key: str) -> "QIcon | None":
         return self._cache.get(key)
 
     def request(self, key: str, path: Path, exe_hint: "Path | None", size: int,
-                fallback_text: str = "") -> None:
+                fallback_text: str = "", hi_res: bool = False) -> None:
+        """排一个取图标的活。
+
+        `hi_res=True` 走 `icons.get_icon_best()`——先取 256×256 的 jumbo 原图，
+        再由 Qt 缩到 `size`。菜单栏这种"图标要比 32px 大"的地方必须开，
+        否则就是把 32×32 硬拉大（原来"图标清晰度太低"的根因）。
+        列表 / 面板那种一次几百个图标的地方保持默认，省内存也省时间。
+        """
         if key in self._cache:
             return
         for existing in self._queue:
             if existing[0] == key:
                 return
-        self._queue.append((key, path, exe_hint, size, fallback_text))
+        self._queue.append((key, path, exe_hint, size, fallback_text, hi_res))
         if not self._timer.isActive():
             self._timer.start()
 
@@ -203,11 +235,14 @@ class IconLoader(QWidget):
             if not self._queue:
                 self._timer.stop()
                 return
-            key, path, hint, size, fallback = self._queue.pop(0)
+            key, path, hint, size, fallback, hi_res = self._queue.pop(0)
             if key in self._cache:
                 continue
             icon = None
-            raw = icons.get_icon(path, size, exe_hint=hint)
+            if hi_res:
+                raw = icons.get_icon_best(path, size, exe_hint=hint)
+            else:
+                raw = icons.get_icon(path, size, exe_hint=hint)
             if raw is not None and getattr(raw, "is_valid", lambda: False)():
                 icon = raw_to_qicon(raw)
             if icon is None:

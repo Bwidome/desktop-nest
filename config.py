@@ -322,6 +322,27 @@ class Config:
         self.set("quick_items", items)
         return True
 
+    def move_to(self, from_index: int, to_index: int) -> bool:
+        """把第 `from_index` 项挪到 `to_index` 这个位置（拖动排序用）。
+
+        跟 `move_quick(index, ±1)` 的区别：那个是"和邻居交换"，只能左移/右移一格；
+        拖动排序要的是"从任意位置落到任意位置"，所以这里用 pop + insert。
+
+        下标按**最终列表**理解：`move_to(0, 2)` 在 `[A,B,C,D]` 上得到
+        `[B,C,A,D]`（A 落在 C 原来的位置上，B、C 依次前移）。
+        越界的 `to_index` 会被夹到合法范围，不抛异常。
+        """
+        items = self.quick_items
+        count = len(items)
+        if not (0 <= from_index < count):
+            return False
+        target = max(0, min(int(to_index), count - 1))
+        if target == from_index:
+            return False
+        items.insert(target, items.pop(from_index))
+        self.set("quick_items", items)
+        return True
+
 
 # --------------------------------------------------------------------------
 # 开机自启（HKCU Run 键，用户级，不需要管理员）

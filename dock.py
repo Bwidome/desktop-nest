@@ -15,10 +15,22 @@
 * 中间是常用启动项，同样是图标 + 名称
 * 右边依次是 ＋ 添加、－ 移除、⚙ 设置、✕ 隐藏整条菜单栏
 * **全部挤在同一行**：底板已经透明，分两行会显得很散
-* 空白处右键出菜单栏设置；按住可左右拖动，位置会记住
+* 空白处右键出菜单栏设置
+
+鼠标怎么用
+----------
+    · 点图标                → 启动
+    · 按住任意位置**拖**    → 整条菜单栏沿屏幕底边左右移动（位置记在 dock_x）
+    · 在常用软件上**长按**再拖 → 手动排序（有插入指示线，松手即生效）
+    · 右键                  → 菜单栏设置
 
 外观：**纯透明的浮层**——没有底板，只有「桌面整理」控件和常用软件的图标
 （外加 ＋ / － / ⚙ / ✕ 四个小按钮）浮在桌面上，见 theme 里的 `#DockSurface`。
+
+图标清晰度：常用软件走 `icons.get_icon_best()`，拿的是系统图像列表里
+**256×256** 的原图，再让 Qt 平滑缩到显示尺寸——原来只拿得到 32×32，
+拉到 44/52 显示就是放大糊图。「桌面整理」那个矢量图标同理，预先画好
+16~256 各档供 Qt 挑。
 """
 
 from __future__ import annotations
@@ -35,12 +47,15 @@ from qt_compat import (
 import engine
 import safety
 import theme as theme_mod
-from widgets import (IconLoader, PLACEHOLDER_COLORS, app_icon, letter_pixmap,
-                     multi_pick)
+from widgets import (IconLoader, PLACEHOLDER_COLORS, app_icon, clear_hover,
+                     letter_pixmap, multi_pick)
 
 DOCK_ICON_SIZES = [36, 44, 52, 60]
 DEFAULT_ICON_SIZE = 44
 MIN_MARGIN = 8
+
+# 「桌面整理」这个矢量图标要预先画成多少档位，供 Qt 按需挑
+GLYPH_SIZES = (16, 24, 32, 48, 64, 96, 128, 192, 256)
 
 
 def make_desktop_glyph(size: int, accent: str = theme_mod.LIGHT["accent"]) -> QPixmap:
@@ -63,6 +78,20 @@ def make_desktop_glyph(size: int, accent: str = theme_mod.LIGHT["accent"]) -> QP
                 int(3.4 * unit), int(3.4 * unit), unit * 0.8, unit * 0.8)
     painter.end()
     return pixmap
+
+
+def desktop_glyph_icon(size: int) -> QIcon:
+    """「桌面整理」入口的多尺寸图标。
+
+    这个图标是**画出来的**（不是从 Shell 取的），所以清晰度完全取决于
+    我们画了几档。只画一张 48px 的话，换大图标或高 DPI 屏上就会被拉大变糊；
+    这里把常用的几档都画进去，Qt 会按实际需要的尺寸挑最合适的那张，
+    跟 `icons.get_icon_best()` 的 256×256 原图是同一个思路。
+    """
+    icon = QIcon()
+    for edge in sorted(set(GLYPH_SIZES) | {max(1, int(size))}):
+        icon.addPixmap(make_desktop_glyph(edge))
+    return icon
 
 
 class FlowRow(QWidget):
@@ -194,10 +223,32 @@ class FlowRow(QWidget):
 
 
 class DockIcon(QToolButton):
-    """Dock 上的一个图标按钮（图标 + 可选的下方名称）。"""
+    """Dock 上的一个图标按钮（图标 + 可选的下方名称）。
+
+    除了"点一下启动"，它还要把三种鼠标意图分清楚并**上报给 DockBar**：
+
+    * 原地按下再松开        → 点击（自己发 `activated`）
+    * 按下后**很快**就拖动  → 拖整条菜单栏（DockBar 接管窗口移动）
+    * 按下后**长按**住再拖  → 对常用软件排序（DockBar 接管）
+
+    为什么长按判定放在这里、而"长按之后干什么"放在 DockBar：
+    排序要改配置里的顺序、还要动布局、还要画插入指示线，那是菜单栏的事。
+    按钮只负责"上报按下 / 移动 / 松开 + 一个长按计时器"，保持自己是哑的。
+
+    ⚠️ `mouseReleaseEvent` 里**没有**调 `super()`：QToolButton 默认会在松开时
+    自己发 `clicked`。这里要的是"拖过就不算点击"，所以自己判断、
+    只发 `activated`，并顺手 `setDown(False)` 把按下态收掉。
+    """
+
+    HOLD_MS = 320          # 长按多久算"要排序"（比常规单击长，避免误触）
+    DRAG_SLOP = 6          # 位移超过这么多像素就不算点击了
 
     activated = Signal(object)
     context_requested = Signal(object, object)
+    press_notify = Signal(object, object)      # (self, 全局坐标)
+    move_notify = Signal(object, object)
+    release_notify = Signal(object, object)
+    hold_notify = Signal(object, object)       # 长按到点了
 
     def __init__(self, icon_size: int, *, show_text: bool = False, parent=None):
         super().__init__(parent)
@@ -210,9 +261,28 @@ class DockIcon(QToolButton):
         self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon if show_text
                                 else Qt.ToolButtonStyle.ToolButtonIconOnly)
         self._refit()
+        # ---- 拖动 / 长按排序用的状态 ----
+        self._pressed = False
+        self._dragging = False            # 由 DockBar 置位：这次按下已升级成拖动
+        self._last_global = QPoint(0, 0)
+        self._hold_timer = QTimer(self)
+        self._hold_timer.setSingleShot(True)
+        self._hold_timer.setInterval(self.HOLD_MS)
+        self._hold_timer.timeout.connect(self._on_hold)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(
             lambda pos: self.context_requested.emit(self, self.mapToGlobal(pos)))
+
+    # ------------------------------------------------------------------
+    # 拖动状态（给 DockBar 用）
+    # ------------------------------------------------------------------
+    def set_dragging(self, value: bool) -> None:
+        """标记"这次按下已经升级成拖动"，松开时就不再当成点击。"""
+        self._dragging = bool(value)
+
+    def _on_hold(self) -> None:
+        if self._pressed and not self._dragging:
+            self.hold_notify.emit(self, self._last_global)
 
     def _refit(self) -> None:
         """按图标 + **当前文字的实际宽度**定尺寸。
@@ -248,10 +318,35 @@ class DockIcon(QToolButton):
         text = text or ""
         return text if len(text) <= limit else text[: limit - 1] + "…"
 
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._pressed = True
+            self._dragging = False
+            self._last_global = event.globalPosition().toPoint()
+            self.press_notify.emit(self, self._last_global)
+            # 长按计时器照常起：到底算不算"排序"由 DockBar 决定
+            # （「桌面整理」入口也能拖动整条菜单栏，只是不能排序）。
+            self._hold_timer.start()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._pressed:
+            self._last_global = event.globalPosition().toPoint()
+            self.move_notify.emit(self, self._last_global)
+        super().mouseMoveEvent(event)
+
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(
-                event.position().toPoint()):
-            self.activated.emit(self)
+        if event.button() == Qt.MouseButton.LeftButton and self._pressed:
+            self._pressed = False
+            self._hold_timer.stop()
+            self._last_global = event.globalPosition().toPoint()
+            # 先上报，让 DockBar 有机会把 _dragging 置位（同线程直连，是同步的）
+            self.release_notify.emit(self, self._last_global)
+            dragged = self._dragging
+            self._dragging = False
+            self.setDown(False)
+            if not dragged and self.rect().contains(event.position().toPoint()):
+                self.activated.emit(self)
             return
         super().mouseReleaseEvent(event)
 
@@ -277,8 +372,23 @@ class DockBar(QWidget):
                               or DEFAULT_ICON_SIZE)
         self._drag_offset = None
         self._buttons: "list[DockIcon]" = []
+        # 常用启动的按钮，**顺序与 cfg.quick_items 一一对应**（不含「桌面整理」和分隔线）。
+        # 拖动排序全靠它算目标槽位。
+        self._app_buttons: "list[DockIcon]" = []
         # 收纳目录内容：不再显示在菜单栏上，只作为「＋ → 从收纳内容里选…」的候选
         self._items: "list[engine.RepoItem]" = []
+
+        # ---- 拖动 / 长按排序的状态机 ----
+        #   ""        没有拖动（按下还没超出阈值，也可能是点击）
+        #   "window"  正在拖整条菜单栏
+        #   "reorder" 正在给常用软件排序
+        self._mode = ""
+        self._press_icon: "DockIcon | None" = None
+        self._press_global = QPoint(0, 0)
+        self._press_in_window = QPoint(0, 0)
+        self._reorder_from = 0
+        self._reorder_to = 0
+        self._drop_line: "QFrame | None" = None
 
         # 布局稳定后校正位置用的短定时器（见 _settle）
         self._settle_timer = QTimer(self)
@@ -340,6 +450,7 @@ class DockBar(QWidget):
 
     def _clear_row(self) -> None:
         """清空应用区与控制按钮。"""
+        self.hide_drop_line()
         self.apps_flow.clear_items()
         for button in self._control_buttons:
             self.main_row.removeWidget(button)
@@ -347,11 +458,38 @@ class DockBar(QWidget):
             button.deleteLater()
         self._control_buttons = []
         self._buttons = []
+        self._app_buttons = []
+        self._clear_stretches()
+
+    def _clear_stretches(self) -> None:
+        """摘掉主行里之前加的弹性占位项。
+
+        `rebuild()` 每次都会 `addStretch(1)`，但清场时只摘控制按钮——
+        弹性占位项会**越积越多**。每个占位项都要占一份 spacing，
+        重建几十次之后菜单栏就会莫名其妙地变宽（而且找不到原因）。
+        """
+        index = self.main_row.count() - 1
+        while index >= 0:
+            entry = self.main_row.itemAt(index)
+            if entry is not None and entry.spacerItem() is not None:
+                self.main_row.takeAt(index)
+            index -= 1
 
     def _add_control(self, widget: QWidget) -> None:
         """把控制按钮摆进主行并登记（供 _clear_row 精确摘除）。"""
         self.main_row.addWidget(widget)
         self._control_buttons.append(widget)
+
+    def _wire_control(self, button: QToolButton, slot) -> None:
+        """接上控制按钮的点击：**先清掉 hover 高光**，再执行动作。
+
+        跟图标按钮是同一个毛病：点完 ＋/⚙/✕ 之后鼠标还停在按钮上，
+        Qt 不会补 leave 事件，`:hover` 那层底色就一直亮着。
+        """
+        def _run(*_args) -> None:
+            clear_hover(button)
+            slot()
+        button.clicked.connect(_run)
 
     def _controls_width(self) -> int:
         """控制按钮那一串占的宽度（含间距）。
@@ -380,13 +518,18 @@ class DockBar(QWidget):
             fallback_text="桌",
             fallback_kind="desktop",
             on_click=lambda _btn: self.toggle_desktop_files.emit(),
-            force_icon=make_desktop_glyph(self._icon_size + 4),
+            force_icon=desktop_glyph_icon(self._icon_size + 4),
         )
         self.apps_flow.add_item(self.desktop_btn)
 
-        separator = self._divider()
-        separator.setFixedHeight(self._icon_size + 10)
-        self.apps_flow.add_item(separator)
+        # 分隔线**只在真有常用项时才插**。
+        # 以前是无条件插一根，于是"还没加任何常用软件"时，＋ 左边就凭空多出
+        # 1px 线 + 左右各 5px margin + 两侧 3px 间距 ≈ 17px 的空隙——
+        # 用户看到的就是图一那个莫名其妙的空档。
+        if self.cfg.quick_items:
+            separator = self._divider()
+            separator.setFixedHeight(self._icon_size + 10)
+            self.apps_flow.add_item(separator)
 
         # ---- 常用启动 ----
         for entry in self.cfg.quick_items:
@@ -395,7 +538,9 @@ class DockBar(QWidget):
             exists = safety.safe_exists(path)
             button = self._make_button(
                 icon_size=self._icon_size,
-                tooltip=f"{name}\n{path}" + ("" if exists else "\n（已失效）"),
+                tooltip=f"{name}\n{path}"
+                        + ("" if exists else "\n（已失效）")
+                        + "\n（按住可拖动排序）",
                 fallback_text=name,
                 fallback_kind=engine.kind_of(path) if exists else "other",
                 on_click=lambda _btn, p=path: self._launch(p),
@@ -415,6 +560,7 @@ class DockBar(QWidget):
             button.context_requested.connect(
                 lambda _btn, pos, e=entry, b=button: self._quick_menu(b, e, pos))
             self.apps_flow.add_item(button)
+            self._app_buttons.append(button)
 
     # ------------------------------------------------------------------
     # 内容
@@ -434,7 +580,7 @@ class DockBar(QWidget):
         self.add_btn.setToolTip("把程序或文件加到菜单栏（可多选批量添加）")
         self.add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.add_btn.setFixedSize(self._icon_size - 6, self._icon_size - 4)
-        self.add_btn.clicked.connect(self._show_add_menu)
+        self._wire_control(self.add_btn, self._show_add_menu)
         self._add_control(self.add_btn)
 
         # ---- 删除按钮：紧挨在「＋」右边，批量移除常用启动 ----
@@ -444,7 +590,7 @@ class DockBar(QWidget):
         self.del_btn.setToolTip("从菜单栏批量移除常用启动（可多选）")
         self.del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.del_btn.setFixedSize(self._icon_size - 6, self._icon_size - 4)
-        self.del_btn.clicked.connect(self.remove_quick_dialog)
+        self._wire_control(self.del_btn, self.remove_quick_dialog)
         # 没有常用项时禁用，避免点了弹空窗
         self.del_btn.setEnabled(bool(self.cfg.quick_items))
         self._add_control(self.del_btn)
@@ -454,7 +600,8 @@ class DockBar(QWidget):
         self.settings_btn.setText("⚙")
         self.settings_btn.setToolTip("设置")
         self.settings_btn.setFixedSize(self._icon_size - 10, self._icon_size - 6)
-        self.settings_btn.clicked.connect(lambda: self.open_settings.emit())
+        self._wire_control(self.settings_btn,
+                           lambda: self.open_settings.emit())
         self._add_control(self.settings_btn)
 
         # ---- 隐藏整条菜单栏 ----
@@ -465,7 +612,7 @@ class DockBar(QWidget):
             "隐藏整条菜单栏\n（之后可从托盘菜单「显示底部菜单栏」重新打开）")
         self.btn_hide_dock.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_hide_dock.setFixedSize(self._icon_size - 10, self._icon_size - 6)
-        self.btn_hide_dock.clicked.connect(self.hide_self)
+        self._wire_control(self.btn_hide_dock, self.hide_self)
         self._add_control(self.btn_hide_dock)
 
         self.main_row.addStretch(1)
@@ -534,17 +681,37 @@ class DockBar(QWidget):
 
     def _make_button(self, *, icon_size: int, tooltip: str, fallback_text: str,
                      fallback_kind: str, on_click, payload=None,
-                     force_icon: "QPixmap | None" = None,
+                     force_icon: "QPixmap | QIcon | None" = None,
                      show_text: bool = False) -> DockIcon:
         button = DockIcon(icon_size, show_text=show_text, parent=self.surface)
         button.setToolTip(tooltip)
         button._payload = payload                      # noqa: SLF001
-        pixmap = force_icon or letter_pixmap(
-            fallback_text, PLACEHOLDER_COLORS.get(fallback_kind, "#94A3B8"), icon_size)
-        button.setIcon(QIcon(pixmap))
-        button.activated.connect(lambda btn: on_click(btn))
+        if force_icon is None:
+            icon = QIcon(letter_pixmap(
+                fallback_text, PLACEHOLDER_COLORS.get(fallback_kind, "#94A3B8"),
+                icon_size))
+        elif isinstance(force_icon, QIcon):
+            icon = force_icon
+        else:
+            icon = QIcon(force_icon)
+        button.setIcon(icon)
+        button.activated.connect(lambda btn: self._on_icon_clicked(btn, on_click))
+        # 拖动 / 长按排序：按钮只上报，怎么处理由菜单栏决定
+        button.press_notify.connect(self._on_icon_press)
+        button.move_notify.connect(self._on_icon_move)
+        button.release_notify.connect(self._on_icon_release)
+        button.hold_notify.connect(self._on_icon_hold)
         self._buttons.append(button)
         return button
+
+    def _on_icon_clicked(self, button: DockIcon, on_click) -> None:
+        """一次"干净的点击"：先把高光清掉，再执行动作。
+
+        需求："打开软件后菜单栏的高光应该随之消失"。点完之后鼠标还停在
+        图标上，Qt 不会自己发 leave 事件，`:hover` 那层底色就会一直亮着。
+        """
+        clear_hover(button)
+        on_click(button)
 
     def _queue_icons(self) -> None:
         for entry in self.cfg.quick_items:
@@ -553,8 +720,10 @@ class DockBar(QWidget):
                 continue
             hint = (engine.resolve_shortcut_target(path)
                     if path.suffix.lower() == ".lnk" else None)
+            # hi_res=True：菜单栏图标要放大显示，必须拿 256×256 的原图再缩，
+            # 否则就是把 32×32 硬拉大（"图标清晰度太低"的根因）。
             self.loader.request(str(path), path, hint, self._icon_size,
-                                entry["name"] or path.name)
+                                entry["name"] or path.name, hi_res=True)
 
     def _on_icon_ready(self, key: str, icon) -> None:
         for button in self._buttons:
@@ -576,10 +745,18 @@ class DockBar(QWidget):
     # 交互
     # ------------------------------------------------------------------
     def _launch(self, path: Path) -> None:
+        # 启动之后鼠标还停在图标上，先把高光清掉——
+        # 不然那条 `:hover` 底色会一直亮着（用户说的"一直保持高亮"）。
+        self.clear_hover()
         ok, reason = engine.launch(path)
         if not ok:
             self.setToolTip(f"{path.name}：{reason}")
             QTimer.singleShot(4000, lambda: self.setToolTip(""))
+
+    def clear_hover(self) -> None:
+        """清掉整条菜单栏上所有按钮的 hover 高光。"""
+        for widget in list(self._buttons) + list(self._control_buttons):
+            clear_hover(widget)
 
     def _quick_menu(self, button, entry: dict, pos=None) -> None:
         """常用启动图标的右键菜单。
@@ -779,22 +956,184 @@ class DockBar(QWidget):
         self.hide()
 
     # ------------------------------------------------------------------
+    # 拖动整条菜单栏 / 长按排序常用软件
+    # ------------------------------------------------------------------
+    # 三种意图的判定（需求："这个菜单栏要可以拖动的" +
+    # "菜单栏可以长按鼠标左键对软件进行手动排序"）：
+    #
+    #   按下空白处              → 直接拖整条菜单栏
+    #   按下图标后**很快**移动  → 也是在拖整条菜单栏（不用非得找空白处下手）
+    #   按下图标后**长按**再动  → 给常用软件排序
+    #   按下图标原地松开        → 点击启动
+    #
+    # 为什么"按下图标快速移动"要归到拖整条菜单栏：菜单栏是**纯透明**的，
+    # 视觉上整条都是"空白"，可实际上图标把能点的位置几乎铺满了——
+    # 只留 8px 外边距能拖的话，用户根本找不到下手的地方。
+    def _begin_window_drag(self) -> None:
+        """进入"拖整条菜单栏"模式。"""
+        self._mode = "window"
+        self._drag_offset = self._press_in_window
+        if self._press_icon is not None:
+            self._press_icon.set_dragging(True)
+            self._press_icon.setCursor(Qt.CursorShape.ClosedHandCursor)
+
+    def _apply_drag(self, global_pos: QPoint) -> None:
+        """拖动中：**只改水平位置**。
+
+        菜单栏是"贴底工具条"，纵向位置由 `reposition()` 统一管（永远贴底）。
+        如果这里跟着鼠标上下跑，松手时又会被 `reposition()` 弹回底部，
+        看起来像"拖到一半自己跳回去"。所以拖动只沿底边走，位置存 `dock_x`。
+        """
+        if self._drag_offset is None:
+            return
+        screen = self.screen().availableGeometry()
+        x = global_pos.x() - self._drag_offset.x()
+        left_limit = screen.left() + 4
+        right_limit = max(left_limit, screen.right() - self.width() - 4)
+        self.move(max(left_limit, min(x, right_limit)), self.y())
+
+    def _on_icon_press(self, button: DockIcon, global_pos: QPoint) -> None:
+        self._mode = ""
+        self._press_icon = button
+        self._press_global = QPoint(global_pos)
+        self._press_in_window = global_pos - self.frameGeometry().topLeft()
+        # 记下按下时在窗口里的相对位置，拖动时用它算窗口该挪到哪
+        self._drag_offset = None
+
+    def _on_icon_hold(self, button: DockIcon, global_pos: QPoint) -> None:
+        """长按到点：如果按的是常用软件，就进入排序模式。"""
+        if self._press_icon is not button or self._mode:
+            return
+        if self._app_index(button) < 0:
+            return                      # 「桌面整理」入口不参与排序
+        self._mode = "reorder"
+        button.set_dragging(True)
+        button.setDown(True)            # 按住的样子，提示"已经抓起来了"
+        button.setCursor(Qt.CursorShape.ClosedHandCursor)
+        self._reorder_from = self._app_index(button)
+        self._reorder_to = self._reorder_from
+        self._drop_line_widget()
+
+    def _on_icon_move(self, button: DockIcon, global_pos: QPoint) -> None:
+        if self._press_icon is not button:
+            return
+        if self._mode == "reorder":
+            self._update_reorder(global_pos)
+            return
+        if self._mode == "window":
+            self._apply_drag(global_pos)
+            return
+        # 还没定模式：位移够大就算"在拖整条菜单栏"，不够就还是点击
+        if (global_pos - self._press_global).manhattanLength() <= DockIcon.DRAG_SLOP:
+            return
+        self._begin_window_drag()
+        self._apply_drag(global_pos)
+
+    def _on_icon_release(self, button: DockIcon, global_pos: QPoint) -> None:
+        mode = self._mode
+        self._mode = ""
+        self._press_icon = None
+        if mode == "reorder":
+            button.setDown(False)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._commit_reorder()
+        elif mode == "window":
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._drag_offset = None
+            self.cfg.set("dock_x", self.x())
+            self.reposition()
+        # mode == "" → 什么都没发生，按钮自己会按"点击"处理
+
+    def _app_index(self, button: DockIcon) -> int:
+        """按钮在**常用软件**里的下标（不含「桌面整理」和分隔线）；不在里面返回 -1。"""
+        try:
+            return self._app_buttons.index(button)
+        except ValueError:
+            return -1
+
+    # ---- 排序指示线 --------------------------------------------------
+    def _drop_line_widget(self) -> QFrame:
+        """插入位置的那根竖线（懒创建，挂在 surface 上浮着）。"""
+        if self._drop_line is None:
+            line = QFrame(self.surface)
+            line.setObjectName("DockDropLine")
+            # 宽度要够：QSS 的 1px 白边是**画在控件内部**的，取 2px 的话
+            # 左右两条边就把整条占满、中间的蓝色一点都看不见，只剩一根白棍。
+            line.setFixedWidth(4)
+            line.hide()
+            self._drop_line = line
+        return self._drop_line
+
+    def hide_drop_line(self) -> None:
+        if self._drop_line is not None:
+            self._drop_line.hide()
+
+    def _update_reorder(self, global_pos: QPoint) -> None:
+        """按光标位置算出目标槽位，并把指示线画到那儿。"""
+        buttons = self._app_buttons
+        if len(buttons) < 2:
+            self.hide_drop_line()
+            return
+        cursor_x = global_pos.x()
+        centers = [b.mapToGlobal(QPoint(b.width() // 2, 0)).x() for b in buttons]
+        target = min(range(len(buttons)), key=lambda i: abs(cursor_x - centers[i]))
+        self._reorder_to = target
+        if target == self._reorder_from:
+            self.hide_drop_line()
+            return
+
+        line = self._drop_line_widget()
+        button = buttons[target]
+        corner = button.mapTo(self.surface, QPoint(0, 0))
+        # 往左移就画在目标槽的左边缘，往右移就画在右边缘——
+        # 这样线的位置就是"松手后它会落到哪"。
+        offset = -4 if target < self._reorder_from else button.width() + 1
+        line.setGeometry(corner.x() + offset, corner.y() + 3,
+                         4, max(8, button.height() - 6))
+        line.raise_()
+        line.show()
+
+    def _commit_reorder(self) -> None:
+        """松手：把顺序写回配置并重建。"""
+        self.hide_drop_line()
+        src, dst = self._reorder_from, self._reorder_to
+        if src == dst:
+            return
+        if self.cfg.move_to(src, dst):
+            self.quick_changed.emit()
+            self.rebuild()
+
+    # ------------------------------------------------------------------
     # 拖动 / 右键
     # ------------------------------------------------------------------
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_offset = (event.globalPosition().toPoint()
-                                 - self.frameGeometry().topLeft())
+            # 按在菜单栏自己的空白处（图标之间的缝、四周留白）→ 直接拖整条
+            self._press_icon = None
+            self._press_global = event.globalPosition().toPoint()
+            self._press_in_window = self._press_global - self.frameGeometry().topLeft()
+            self._begin_window_drag()
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        if self._drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
-            self.move(event.globalPosition().toPoint() - self._drag_offset)
+        if (self._mode == "window" and self._drag_offset is not None
+                and event.buttons() & Qt.MouseButton.LeftButton):
+            self._apply_drag(event.globalPosition().toPoint())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        if self._drag_offset is not None:
+        if self._mode == "window" and self._press_icon is None:
+            self._mode = ""
             self._drag_offset = None
             self.cfg.set("dock_x", self.x())
             self.reposition()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
         menu = QMenu(self)

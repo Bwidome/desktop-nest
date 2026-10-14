@@ -504,6 +504,16 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
 #DockIcon:pressed {{
     background: rgba(84, 90, 104, 0.62);
 }}
+/* 长按拖动排序时，插在目标位置的那根指示线。
+   底板是纯透明的，所以颜色必须自己够亮——用品牌蓝打底 + 一圈白边，
+   浅色壁纸和深色壁纸上都看得见。
+   ⚠️ 控件宽度要给够（dock.py 里设的 4px）：QSS 的 border 画在控件**内部**，
+   只给 2px 的话左右白边就把中间占满了，蓝色一点都露不出来。 */
+#DockDropLine {{
+    background: {c['accent']};
+    border: 1px solid rgba(255, 255, 255, 190);
+    border-radius: 2px;
+}}
 #DockNav {{
     background: rgba(52, 56, 66, 0.34);
     border: 1px solid rgba(255, 255, 255, 40);

@@ -32,13 +32,13 @@ _IMPORT_ERROR = ""
 # 少一个名字会让某个模块 import 直接失败，所以增删请同步检查调用方。
 try:
     from PyQt6.QtCore import (  # noqa: F401
-        QEventLoop, QLibraryInfo, QPoint, QRect, QSize,
+        QEvent, QEventLoop, QLibraryInfo, QPoint, QPointF, QRect, QSize,
         Qt, QThread, QTimer, pyqtSignal as Signal,
     )
     from PyQt6.QtGui import (  # noqa: F401
         QAction, QColor, QCursor, QFont, QFontDatabase, QFontMetrics, QIcon,
-        QImage, QLinearGradient, QPainter, QPainterPath, QPalette, QPixmap,
-        QRadialGradient,
+        QImage, QLinearGradient, QMouseEvent, QPainter, QPainterPath, QPalette,
+        QPixmap, QRadialGradient,
     )
     from PyQt6.QtWidgets import (  # noqa: F401
         QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
@@ -55,13 +55,13 @@ except ImportError as exc:  # pragma: no cover
         # 与上面的 PyQt6 清单保持一一对应（此前 PySide6 分支漏了
         # QGridLayout / QInputDialog，一旦回退就会 NameError）。
         from PySide6.QtCore import (  # type: ignore  # noqa: F401
-            QEventLoop, QLibraryInfo, QPoint, QRect, QSize,
+            QEvent, QEventLoop, QLibraryInfo, QPoint, QPointF, QRect, QSize,
             Qt, QThread, QTimer, Signal,
         )
         from PySide6.QtGui import (  # type: ignore  # noqa: F401
             QAction, QColor, QCursor, QFont, QFontDatabase, QFontMetrics, QIcon,
-            QImage, QLinearGradient, QPainter, QPainterPath, QPalette, QPixmap,
-            QRadialGradient,
+            QImage, QLinearGradient, QMouseEvent, QPainter, QPainterPath,
+            QPalette, QPixmap, QRadialGradient,
         )
         from PySide6.QtWidgets import (  # type: ignore  # noqa: F401
             QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,

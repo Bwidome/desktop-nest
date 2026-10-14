@@ -13,6 +13,13 @@
 7. 收纳面板不是普通应用窗口，而是贴底的**磨砂玻璃上拉浮层**
 8. 打开 / 反复翻页收纳面板时，底部菜单栏不会无故消失
 9. 菜单栏底板是**纯透明**的，而且只有一行（图标与控制按钮同一水平线）
+10. 菜单栏图标按钮要装得下自己的文字（高 DPI 下别叠字）
+11. 还没加常用软件时，「＋」左边不该有空隙（分隔线不该无条件插）
+12. 整条菜单栏可以用鼠标拖动（空白处 + 图标上快速拖都行）
+13. 点开软件之后，图标上的高光要跟着消失（不能一直亮着）
+14. 长按鼠标左键可以拖动排序常用软件（有插入指示线，结果写回配置）
+15. 菜单栏图标要用 256×256 的高清原图（旧路径只有 32×32）
+16. Config.move_to：把任意一项挪到任意位置
 
 用法：python dev/test_dock_fixes.py
 """
@@ -432,6 +439,283 @@ def main() -> int:
         expected = max(32 + 20, need)
         check(f"「{label}」宽度按文字自适应（{icon.width()}px）",
               icon.width() == expected, f"w={icon.width()} 期望={expected}")
+
+    # ==================================================================
+    # 第二轮：菜单栏拖动 / ＋ 左边空隙 / 高光残留 / 长按排序 / 图标清晰度
+    # ==================================================================
+    from qt_compat import QEvent, QMouseEvent, QPoint, QPointF, Qt as _Q
+
+    def send_mouse(widget, kind, local: "QPoint", glob: "QPoint",
+                   buttons=_Q.MouseButton.LeftButton) -> "QMouseEvent":
+        """往控件发一个鼠标事件（用来模拟真实点击 / 拖动）。"""
+        event = QMouseEvent(kind, QPointF(local), QPointF(glob),
+                            _Q.MouseButton.LeftButton, buttons,
+                            _Q.KeyboardModifier.NoModifier)
+        app.sendEvent(widget, event)
+        app.processEvents()
+        return event
+
+    def press(widget):
+        local = widget.rect().center()
+        return local, widget.mapToGlobal(local)
+
+    def wait_until(predicate, seconds: float = 2.0) -> bool:
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.02)
+            if predicate():
+                return True
+        return bool(predicate())
+
+    def rebuild_dock() -> None:
+        """重建菜单栏并等它"落定"。
+
+        `rebuild()` 之后菜单栏会起一个 60ms 的短定时器（`DockBar._settle`），
+        在**布局真正稳定之后**再校正一次尺寸——刚建出来的控制按钮还没被
+        布局量过，这一刻的 `sizeHint()` 是偏小的。不等这一步就量几何，
+        会量到一个还没定型的中间态。
+        """
+        dock.rebuild()
+        wait_until(lambda: not dock._settle_timer.isActive(), 1.5)
+        app.processEvents()
+
+    dock.show_bar()
+    app.processEvents()
+    # 菜单栏有个 60ms 的"布局稳定后校正位置"定时器（见 DockBar._settle）。
+    # 不等它跑完就自己 move()，会被它按 dock_x 拉回去，测试就假失败了。
+    wait_until(lambda: not dock._settle_timer.isActive(), 1.0)
+
+    def park_dock_at_left_edge() -> int:
+        """把菜单栏摆到屏幕最左边，返回它的 x。
+
+        摆到最左是为了让"+80px"这个位移一定不会被屏幕边界夹掉——
+        测试要断言精确位移，就不能让夹取逻辑插手。
+        """
+        wait_until(lambda: not dock._settle_timer.isActive(), 1.0)
+        dock.move(dock.screen().availableGeometry().left() + 4, dock.y())
+        app.processEvents()
+        return dock.x()
+
+    print()
+    print("── 11. 还没加常用软件时，「＋」左边不该有空隙 ──")
+    # 先清空常用项，回到"刚装好、一个都没加"的状态
+    while cfg.quick_items:
+        cfg.remove_quick(cfg.quick_items[0]["path"])
+    rebuild_dock()
+    check("应用区只剩「桌面整理」一项（没有多余的分隔线）",
+          dock.apps_flow.item_count() == 1, str(dock.apps_flow.item_count()))
+    desktop_pos = dock.desktop_btn.mapTo(dock, QPoint(0, 0))
+    add_pos = dock.add_btn.mapTo(dock, QPoint(0, 0))
+    gap = add_pos.x() - (desktop_pos.x() + dock.desktop_btn.width())
+    # 改之前这里 ≈17px：1px 分隔线 + 左右各 5px margin + 两侧 3px 间距。
+    # 现在只剩布局自身的一个间距（3px），最多放宽到 8px。
+    check(f"「＋」左边只剩一个间距（{gap}px，原来 ≈17px）", 0 <= gap <= 8,
+          f"{gap}px | 桌面整理 x={desktop_pos.x()} w={dock.desktop_btn.width()} | "
+          f"＋ x={add_pos.x()} w={dock.add_btn.width()} | "
+          f"窗口 w={dock.width()} | apps_flow w={dock.apps_flow.width()} "
+          f"items={dock.apps_flow.item_count()} cols={dock.apps_flow._columns}")
+
+    # 有常用项时分隔线要回来（图标和入口之间需要一点视觉区分）
+    quick_sources = [i for i in tray.nest_items if i.kind == "shortcut"][:4]
+    check("有足够的快捷方式来做常用项（≥3 个）", len(quick_sources) >= 3,
+          str(len(quick_sources)))
+    for source_item in quick_sources:
+        cfg.add_quick(source_item.path, source_item.name)
+    rebuild_dock()
+    wait_until(lambda: len(dock._app_buttons) == len(quick_sources), 5)
+    check("加了常用项之后分隔线会回来",
+          dock.apps_flow.item_count() == len(quick_sources) + 2,
+          f"{dock.apps_flow.item_count()} vs {len(quick_sources) + 2}")
+    check("主行里的弹性占位项没有越积越多（重建会清掉旧的）",
+          sum(1 for i in range(dock.main_row.count())
+              if dock.main_row.itemAt(i).spacerItem() is not None) == 1,
+          str(dock.main_row.count()))
+
+    print()
+    print("── 12. 整条菜单栏可以用鼠标拖动 ──")
+    # 底板 / 应用区必须"不吃"鼠标按下，否则按下不会冒泡到菜单栏，
+    # 整条栏就没有能下手拖动的地方（原来就是这个原因拖不动）。
+    #
+    # 注意 `QApplication.sendEvent()` 是直接投递给指定控件的，但 Qt 在
+    # 收到**被忽略**的鼠标按下时，会沿父链往上冒泡，直到有控件 accept 为止
+    # （`QWidget::mousePressEvent` 的默认实现就是 `event->ignore()`）。
+    # 所以"把按下发给 surface，看菜单栏有没有进入拖动模式"能真实反映
+    # 用户按在空白处时的行为。
+    for name, widget in (("底板 #DockSurface", dock.surface),
+                         ("应用区 FlowRow", dock.apps_flow)):
+        dock._mode = ""
+        dock._press_icon = None
+        local = QPoint(3, 3)
+        glob = widget.mapToGlobal(local)
+        event = send_mouse(widget, QEvent.Type.MouseButtonPress, local, glob)
+        check(f"按在{name}上会冒泡给菜单栏（能开始拖动）",
+              dock._mode == "window" and event.isAccepted(),
+              f"mode={dock._mode!r} accepted={event.isAccepted()}")
+        send_mouse(widget, QEvent.Type.MouseButtonRelease, local, glob)
+        check(f"松手后{name}上的拖动状态复位", dock._mode == "", repr(dock._mode))
+
+    # 1) 从空白处拖
+    x_before = park_dock_at_left_edge()
+    local = QPoint(4, dock.height() // 2)
+    glob = dock.mapToGlobal(local)
+    send_mouse(dock, QEvent.Type.MouseButtonPress, local, glob)
+    check("按下空白处立刻进入「拖整条菜单栏」模式", dock._mode == "window",
+          repr(dock._mode))
+    send_mouse(dock, QEvent.Type.MouseMove, local, glob + QPoint(80, 0))
+    moved_from_blank = dock.x()
+    send_mouse(dock, QEvent.Type.MouseButtonRelease, local, glob + QPoint(80, 0))
+    check(f"空白处拖动有效（{x_before} → {moved_from_blank}）",
+          moved_from_blank == x_before + 80, f"位移 {moved_from_blank - x_before}px")
+    check("拖动后位置写进了配置", int(cfg.get("dock_x") or 0) == moved_from_blank,
+          f"dock_x={cfg.get('dock_x')} x={dock.x()}")
+
+    # 2) 从图标上快速拖（纯透明菜单栏上图标铺满了整条，必须也能拖）
+    x_before = park_dock_at_left_edge()
+    button = dock._app_buttons[0]
+    local, glob = press(button)
+    send_mouse(button, QEvent.Type.MouseButtonPress, local, glob)
+    for step in range(1, 5):
+        send_mouse(button, QEvent.Type.MouseMove, local, glob + QPoint(step * 20, 0))
+    send_mouse(button, QEvent.Type.MouseButtonRelease, local, glob + QPoint(80, 0))
+    check(f"按住图标快速拖也能拖动整条（{x_before} → {dock.x()}）",
+          dock.x() == x_before + 80, f"位移 {dock.x() - x_before}px")
+    check("拖完之后模式复位", dock._mode == "", repr(dock._mode))
+    check("拖动时不会纵向乱跑（仍然贴底）",
+          dock.y() + dock.height() <= dock.screen().availableGeometry().bottom(),
+          f"底边 {dock.y() + dock.height()}")
+
+    print()
+    print("── 13. 点开软件之后高光要跟着消失 ──")
+    import engine as engine_mod
+
+    real_launch = engine_mod.launch
+    launched: "list[str]" = []
+    engine_mod.launch = lambda p: (launched.append(str(p)), (True, ""))[1]
+    try:
+        button = dock._app_buttons[0]
+        # 模拟"鼠标还停在图标上"的状态
+        button.setAttribute(_Q.WidgetAttribute.WA_UnderMouse, True)
+        style = button.style()
+        style.unpolish(button)
+        style.polish(button)
+        button.update()
+        app.processEvents()
+        hovered = button.grab().toImage()
+
+        local, glob = press(button)
+        send_mouse(button, QEvent.Type.MouseButtonPress, local, glob)
+        send_mouse(button, QEvent.Type.MouseButtonRelease, local, glob)
+        app.processEvents()
+        check("点一下确实启动了", len(launched) == 1, str(launched))
+        check("启动之后 WA_UnderMouse 被清掉",
+              not button.testAttribute(_Q.WidgetAttribute.WA_UnderMouse))
+        plain = button.grab().toImage()
+        check("画面真的变了（不只是改了个标记位）", hovered != plain)
+
+        # 按下后拖走再松 → 不该启动
+        launched.clear()
+        button = dock._app_buttons[1]
+        local, glob = press(button)
+        send_mouse(button, QEvent.Type.MouseButtonPress, local, glob)
+        for step in range(1, 4):
+            send_mouse(button, QEvent.Type.MouseMove, local, glob + QPoint(step * 15, 0))
+        send_mouse(button, QEvent.Type.MouseButtonRelease, local, glob + QPoint(45, 0))
+        app.processEvents()
+        check("拖动过之后松手不算点击（不会误启动）", not launched, str(launched))
+
+        print()
+        print("── 14. 长按左键拖动排序常用软件 ──")
+        names_before = [Path(str(b._payload)).name for b in dock._app_buttons]
+        source = dock._app_buttons[0]
+        local, glob = press(source)
+        send_mouse(source, QEvent.Type.MouseButtonPress, local, glob)
+        entered = wait_until(lambda: dock._mode == "reorder", 2)
+        check("长按之后进入排序模式", entered and dock._mode == "reorder",
+              repr(dock._mode))
+        check("按住的图标呈「抓起」状态（isDown）", source.isDown())
+
+        target = dock._app_buttons[2]
+        target_glob = target.mapToGlobal(target.rect().center())
+        send_mouse(source, QEvent.Type.MouseMove, local, target_glob)
+        check("按光标位置算出了目标槽位", dock._reorder_to == 2,
+              str(dock._reorder_to))
+        line = dock._drop_line
+        check("插入指示线显示出来了", line is not None and line.isVisible())
+        if line is not None and line.isVisible():
+            check("指示线画在目标槽的右边缘（往右移）",
+                  line.geometry().x() > target.mapTo(dock.surface, QPoint(0, 0)).x(),
+                  f"线 x={line.geometry().x()}")
+
+        send_mouse(source, QEvent.Type.MouseButtonRelease, local, target_glob)
+        wait_until(lambda: len(dock._app_buttons) == len(names_before), 5)
+        names_after = [Path(str(b._payload)).name for b in dock._app_buttons]
+        expected = [names_before[1], names_before[2], names_before[0]] + names_before[3:]
+        check("顺序按拖动结果重排了", names_after == expected,
+              f"{names_after} vs {expected}")
+        check("配置里的顺序也同步了",
+              [Path(e["path"]).name for e in cfg.quick_items] == expected,
+              str([Path(e["path"]).name for e in cfg.quick_items]))
+        check("UI 顺序与配置顺序一致（没有不同步）",
+              names_after == [Path(e["path"]).name for e in cfg.quick_items])
+        check("松手后指示线收起来了",
+              dock._drop_line is None or not dock._drop_line.isVisible())
+        check("排序过程中没有顺手把软件启动了", not launched, str(launched))
+    finally:
+        engine_mod.launch = real_launch
+
+    print()
+    print("── 15. 图标清晰度：菜单栏要拿 256×256 的原图 ──")
+    import icons as icons_mod
+
+    for button in dock._app_buttons:
+        sizes = [s.width() for s in button.icon().availableSizes()]
+        check(f"{Path(str(button._payload)).name} 用的是高清原图（{max(sizes)}px）",
+              max(sizes) >= 256, str(sizes))
+    glyph_sizes = [s.width() for s in dock.desktop_btn.icon().availableSizes()]
+    check(f"「桌面整理」矢量图标有多档尺寸（{len(glyph_sizes)} 档）",
+          len(glyph_sizes) >= 5 and max(glyph_sizes) >= 192, str(glyph_sizes))
+
+    link = Path(cfg.quick_items[0]["path"])
+    best = icons_mod.get_icon_best(link, 44)
+    check("get_icon_best() 对 .lnk 能取到 256×256",
+          best is not None and best.width >= 256 and best.height >= 256,
+          f"{best.width}x{best.height}" if best else "None")
+    # 老路径只有 32×32 —— 这正是"图标清晰度太低"的根因，钉住它别再退回去
+    plain_icon = icons_mod.get_icon(link, 44)
+    check("旧路径（SHGetFileInfoW）确实只有 32×32（所以必须走 jumbo）",
+          plain_icon is not None and plain_icon.width <= 48,
+          f"{plain_icon.width}x{plain_icon.height}" if plain_icon else "None")
+
+    from widgets import IconLoader
+
+    loader = IconLoader(per_tick=0)          # 不真去取，只看排队记录
+    loader.request("probe", link, None, 44, "x", hi_res=True)
+    check("菜单栏的取图请求带上了高清标记",
+          bool(loader._queue) and loader._queue[0][-1] is True,
+          str(loader._queue[0][-1] if loader._queue else None))
+    loader._timer.stop()
+    loader.deleteLater()
+
+    print()
+    print("── 16. Config.move_to：把任意一项挪到任意位置 ──")
+    letters = "ABCD"
+    cfg.set("quick_items", [{"path": c, "name": c} for c in letters])
+    cfg.move_to(0, 2)
+    check("[A,B,C,D] move_to(0,2) → [B,C,A,D]",
+          [e["name"] for e in cfg.quick_items] == ["B", "C", "A", "D"],
+          str([e["name"] for e in cfg.quick_items]))
+    cfg.set("quick_items", [{"path": c, "name": c} for c in letters])
+    cfg.move_to(3, 1)
+    check("[A,B,C,D] move_to(3,1) → [A,D,B,C]",
+          [e["name"] for e in cfg.quick_items] == ["A", "D", "B", "C"],
+          str([e["name"] for e in cfg.quick_items]))
+    check("原地不动返回 False（不白写一次盘）", cfg.move_to(1, 1) is False)
+    check("越界下标被夹住，不抛异常",
+          cfg.move_to(0, 99) is True
+          and [e["name"] for e in cfg.quick_items] == ["D", "B", "C", "A"],
+          str([e["name"] for e in cfg.quick_items]))
+    check("非法来源下标返回 False", cfg.move_to(9, 0) is False)
 
     print()
     print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")
