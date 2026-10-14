@@ -52,7 +52,7 @@ from textutil import fuzzy_match
 from widgets import (GlassCardMixin, IconLoader, PLACEHOLDER_COLORS, app_icon,
                      icon_hint_for, letter_pixmap, multi_pick, pixmap_for)
 
-GRID_ICON = 48
+GRID_ICON = 40                 # 网格里的图标显示尺寸（原来 48，偏大）
 ICON_REQUEST = 64              # 向 Windows 要更大的图标再缩，清晰得多
 CELL_W = 116
 CELL_H = 110

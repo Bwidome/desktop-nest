@@ -120,15 +120,37 @@ def main() -> int:
     cfg.update({"quick_items": quick})
     print(f"菜单栏常用启动：{[e['name'] for e in quick]}")
 
+    # 演示数据：用**桌面上真实存在的快捷方式**（只读，不移动任何文件）。
+    # 特意挑了几个"图标画布占比差得很远"的：Cpolar / Masm / SQL Server
+    # 原来在 256×256 画布里只占 12%~18%，缩到 40px 后内容只剩几个像素；
+    # 而 Apifox / Chrome / KOOK 是占满整张画布的。放在一起才看得出
+    # "裁掉透明边距之后大小统一了"。
     items = []
-    for name, kind, size in (("季度报告.docx", "file", 240_000),
-                             ("预算表.xlsx", "file", 88_000),
-                             ("单片机入门资料", "folder", 0),
-                             ("产品路线图.pptx", "file", 1_800_000),
-                             ("简历.pdf", "file", 610_000),
-                             ("截图.png", "file", 420_000)):
-        items.append(engine.RepoItem(base / name, name,
-                                     kind == "folder", kind, size, 1_760_000_000))
+    desktop_dir = Path(os.path.expanduser("~")) / "Desktop"
+    demo = ["Cpolar Web UI.lnk", "Masm for Windows 集成实验环境 2015.lnk",
+            "Microsoft SQL Server Management Studio 18.lnk", "Apifox.lnk",
+            "Google Chrome.lnk", "Steam.lnk", "KOOK.lnk", "Discord.lnk",
+            "Bandizip.lnk", "FlClash.lnk", "Adobe Premiere Pro 2023.lnk",
+            "IntelliJ IDEA 2026.2.0.1.lnk", "MEGAsync.lnk", "MuMu模拟器.lnk"]
+    for name in demo:
+        path = desktop_dir / name
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        items.append(engine.RepoItem(path, name, False, "shortcut",
+                                     stat.st_size, stat.st_mtime))
+    if not items:                       # 桌面上没有就退回一组假文件
+        for name, kind, size in (("季度报告.docx", "file", 240_000),
+                                 ("预算表.xlsx", "file", 88_000),
+                                 ("单片机入门资料", "folder", 0),
+                                 ("产品路线图.pptx", "file", 1_800_000),
+                                 ("简历.pdf", "file", 610_000),
+                                 ("截图.png", "file", 420_000)):
+            items.append(engine.RepoItem(base / name, name,
+                                         kind == "folder", kind, size,
+                                         1_760_000_000))
+    print(f"收纳面板演示项：{len(items)} 个")
 
     panel = MainPanel(cfg)
     panel.update_overview(items=items, nest_items=len(items), desktop_pending=3,
@@ -234,7 +256,12 @@ def main() -> int:
 
     # ---- 第四张：收纳面板（上拉磨砂浮层）+ 底部菜单栏 ----
     def shoot_popup():
-        browser.show_window()
+        # 不用 show_window()：它会先 refresh_from_disk()，把上面精心挑的
+        # 演示项覆盖成真实收纳目录的内容。这里手动走一遍它该做的事。
+        browser.set_items(items)
+        browser.reposition()
+        browser.show()
+        browser.raise_()
         app.processEvents()
         QTimer.singleShot(1500, capture_popup)
 

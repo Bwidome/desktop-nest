@@ -8,6 +8,10 @@
 
 技术栈：**Python + PyQt6**（Win10 / Win11）。纯本地运行，不联网、不装服务、不上传任何东西。
 
+> **换电脑 / 第一次部署 / 想知道数据存在哪**：看
+> **[使用与迁移指南.md](使用与迁移指南.md)** —— 环境要求、三步上手、
+> 迁移清单（哪些要拷、哪些别拷）、数据位置表、常见问题、卸载还原都在里面。
+
 ---
 
 ## 快速开始
@@ -115,7 +119,8 @@
 | **入口和常用软件之间有一块"空白格"** | 应用区是**等宽网格**（`unit_size()` 取所有条目的最大宽度当格子宽），那根 1px 分隔线也会**占满一整格**（≈ 一个图标宽），看着就是一块空白格；而且入口没文字、比常用项窄，自己那格右侧还会空出一截 | **彻底不插分隔线**；再用 `DockIcon.set_min_width()` 把入口抬到和常用项一样宽。两者之间只剩布局的一个 spacing（实测 3px） |
 | **打开软件后高光一直亮着** | 点完鼠标还停在图标上，Qt 不会补发 leave 事件，`WA_UnderMouse` 一直为真，`:hover` 那层底色就永远亮着 | 启动 / 点控制按钮后调 `widgets.clear_hover()`：清 `WA_UnderMouse` + `unpolish/polish` + `update()` |
 | **不能手动排序常用软件** | 原来只有右键菜单的「左移 / 右移」，一次挪一格 | 长按拖动排序 + 插入指示线；配置层新增 `Config.move_to(from, to)`（`move_quick` 只能和邻居交换，做不了"任意位置落到任意位置"） |
-| **图标清晰度太低** | `SHGetFileInfoW` 只有两档：LARGEICON 顶天 **32×32**，SMALLICON 16×16。菜单栏要显示 44 / 52、收纳面板要显示 48，等于把 32×32 硬拉大 | 新增 `icons.get_icon_best()`：`SHGetImageList(SHIL_JUMBO)` 拿 **256×256** 原图，再让 Qt 平滑缩到显示尺寸。**菜单栏和收纳面板都走这一档** |
+| **图标清晰度太低** | `SHGetFileInfoW` 只有两档：LARGEICON 顶天 **32×32**，SMALLICON 16×16。菜单栏要显示 44 / 52、收纳面板要显示 40，等于把 32×32 硬拉大 | 新增 `icons.get_icon_best()`：`SHGetImageList(SHIL_JUMBO)` 拿 **256×256** 原图，再让 Qt 平滑缩到显示尺寸。**菜单栏和收纳面板都走这一档** |
+| **有的图标看着特别小** | Windows 图标**不都是"内容铺满画布"**的。实测同一台机器上 Apifox / Chrome / Steam 占 90%~100%，而 Cpolar 只占 **12%**、Masm 17%、SQL Server 18%、SakuraFrp 19%。这类"大画布 + 中间一小块内容"缩到 40px 后，内容只剩 5~7 个像素 | `get_icon_best()` 里加 `content_box()` + `crop_raw()`：**裁掉四周的透明边距**，让所有图标的内容都占满显示尺寸。缓存版本号 `v1` → `v2` 让旧图失效 |
 
 > 顺带修掉一个潜在泄漏：`rebuild()` 每次都 `main_row.addStretch(1)`，
 > 但清场时只摘控制按钮，**弹性占位项会越积越多**——每个都要占一份 spacing，
@@ -124,22 +129,46 @@
 ### 图标清晰度是怎么提上来的
 
 ```
-  旧： SHGetFileInfoW(SHGFI_ICON|SHGFI_LARGEICON)  →  32×32  →  拉到 44 / 48 显示 = 糊
+  旧： SHGetFileInfoW(SHGFI_ICON|SHGFI_LARGEICON)  →  32×32  →  拉到 44 / 40 显示 = 糊
   新： SHGetFileInfoW(SHGFI_SYSICONINDEX) → 图标编号
        SHGetImageList(SHIL_JUMBO) → IImageList → GetIcon(i) → 256×256
-       → 交给 Qt 平滑缩到 44 / 48 / 52 / 60（QIcon 内部用 SmoothTransformation）
+       → 裁掉四周透明边距（让内容占满）
+       → 交给 Qt 平滑缩到 40 / 44 / 52 / 60（QIcon 内部用 SmoothTransformation）
 ```
 
 走这一档的地方（`IconLoader.request(..., hi_res=True)`）：
 
 * **菜单栏**：常用软件图标显示 44（可在设置里调到 28~80）；
-* **收纳面板**：网格里的图标显示 48、顶部常用启动行显示 34。
+* **收纳面板**：网格里的图标显示 **40**、顶部常用启动行显示 34。
 
 > 收纳面板原来只写了 `ICON_REQUEST = 64`，可 `get_icon()` 顶天只给 32×32，
-> 所以 48px 的格子其实是把 32 的图**拉大 1.5 倍**——照样糊。
+> 所以格子里的图其实是把 32 的图**拉大 1.25 倍**——照样糊。
 > 现在这两处也带上了 `hi_res=True`，和菜单栏取同一张 256×256 原图。
 
 主面板那种 16px 的列表小图标仍走 32px 档（2:1 下采样已经很清晰，省内存也省时间）。
+
+### 为什么还要裁掉透明边距
+
+`SHIL_JUMBO` 给的是 **256×256 的画布**，但**内容并不一定铺满**：
+
+| 图标 | 内容占画布 |
+| --- | --- |
+| Apifox / Chrome / KOOK / Steam | 90% ~ 100% |
+| Adobe Premiere Pro / Discord / Bandizip | 90% 上下 |
+| **Cpolar Web UI** | **12% × 14%** |
+| **Masm for Windows** | 17% × 18% |
+| **SQL Server Management Studio** | 18% × 18% |
+| **SakuraFrp / 慕讯加速器** | 19% × 19% |
+
+不裁的话，最后那几个缩到 40px 之后内容只剩 **5~7 个像素**，看上去就是
+"这个图标怎么这么小"。`content_box()` 扫一遍 alpha 通道找出内容的外接框，
+`crop_raw()` 按框裁出新图——裁完所有图标的内容都占满显示尺寸，大小就统一了。
+
+> 实测：Cpolar `256×256 → 30×36`、Masm `→ 44×45`、SQL Server `→ 46×46`、
+> 而本来就占满的 Apifox / KOOK 保持 `256×256` 不动（`crop_raw` 会原样返回，不白拷一遍）。
+>
+> 这一步只作用于 **jumbo 档**（`get_icon_best`）。缓存键里的版本号从 `v1` 提到 `v2`，
+> 否则升级后读到的还是磁盘上没裁过的旧图，看着像没生效。
 
 `SHGFI_SYSICONINDEX` 拿到的编号在 16 / 32 / 48 / 256 各张系统图像列表里指的是**同一个图标**，
 所以可以"要 32 的编号、取 256 的图"。取完必须 `IImageList::Release()`，否则每次调用都漏一个引用。
@@ -452,6 +481,7 @@ abort 的）也记进 `crash.log`——这种崩溃 Python 的 `try/except` 抓�
 
 ```
 desktop-nest\
+├── 使用与迁移指南.md       **换电脑 / 首次部署看这个**（环境要求、迁移清单、数据位置、常见问题）
 ├── 启动桌面收纳.bat        启动器（自动挑一个能用的 Python）
 ├── 创建快捷方式.bat        在桌面/开始菜单放一个带图标的快捷方式
 ├── 还原桌面.bat            应急：把收纳目录里的东西全部搬回桌面
@@ -634,7 +664,7 @@ python dev\run_all.py test_core test_nest     :: 只跑名字里含这些关键�
 python dev\test_core.py          :: 快捷方式创建+二进制解析 / 安全校验 / 模糊搜索（42）
 python dev\test_move.py          :: 搬运安全性与失败回滚（13）
 python dev\test_icons_page.py    :: 翻页后图标不消失（11）
-python dev\test_dock_fixes.py    :: 启动崩溃 / 常用图标 / 高亮 / 显隐 / 玻璃浮层 / 翻页时 Dock 不消失 / 单行透明底板 / 应用区不留空白格 / 整条可拖 / 高光随点随消 / 长按拖动排序 / 菜单栏与收纳面板图标取 256×256（103）
+python dev\test_dock_fixes.py    :: 启动崩溃 / 常用图标 / 高亮 / 显隐 / 玻璃浮层 / 翻页时 Dock 不消失 / 单行透明底板 / 应用区不留空白格 / 整条可拖 / 高光随点随消 / 长按拖动排序 / 菜单栏与收纳面板图标取 256×256 / 图标裁透明边距（111）
 python dev\test_round3.py        :: 常用图标 / 不跑出屏幕 / 窗口图标 / DPI 字体 / 让开判据（24）
 python dev\test_quick_apps.py    :: 常用软件：图标 / 增删同步 / 不留空白 / 持久化 + Dock 加新项图标不丢、删项尺寸缩回、纯透明底板（34）
 python dev\test_iteration.py     :: 右键菜单不崩 / 崩溃自动还原 / 批量增删 / Dock 只对最大化避让 + 防抖（44）
@@ -642,7 +672,7 @@ python dev\test_panel_glass.py   :: 两张玻璃卡片：高 DPI 圆角裁剪 / 
 python dev\test_nest.py --shots  :: 收纳主流程 / 两个桌面 / 分页 / 后缀开关 / Dock 稳定性 / 启动收纳退出还原（114）
 ```
 
-九套共 **434 项检查**，都只在临时沙盒目录里操作，**不会碰真实桌面**。
+九套共 **442 项检查**，都只在临时沙盒目录里操作，**不会碰真实桌面**。
 `--shots` 会把界面截图存到 `shots\`。
 
 > 「让开判据」那一条会读当前真实的前台窗口，所以它是**按实现里的规则复算期望值**

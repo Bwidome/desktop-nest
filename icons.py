@@ -392,7 +392,9 @@ def icon_key(path: Path, size: int) -> str:
         stamp = f"{int(stat.st_mtime)}-{stat.st_size}"
     except OSError:
         stamp = "missing"
-    raw = f"{os.path.normcase(str(path))}|{stamp}|{size}|v1"
+    # 版本号 v2：jumbo 档加了"裁掉透明边距"，旧缓存里存的图是没裁过的，
+    # 不换版本号的话升级后拿到的还是老图，看着像没生效。
+    raw = f"{os.path.normcase(str(path))}|{stamp}|{size}|v2"
     return hashlib.sha1(raw.encode("utf-8", "surrogatepass")).hexdigest()[:20]
 
 
@@ -440,6 +442,64 @@ def _save_png(raw: RawIcon) -> None:
         img.save(cache_dir() / f"{raw.key}.png", "PNG", optimize=True)
     except Exception:
         pass
+
+
+# --------------------------------------------------------------------------
+# 裁剪：让内容占满画布（解决"有的图标看着特别小"）
+# --------------------------------------------------------------------------
+def content_box(raw: "RawIcon", threshold: int = 8):
+    """找内容（非透明像素）的外接框，返回 `(left, top, right, bottom)`。
+
+    为什么需要它：Windows 图标**并不都是"内容铺满整张画布"**的。
+    实测同一台机器上，Apifox / Chrome / Steam 这类占 90%~100%，
+    而 Cpolar Web UI 只占 **12%**、Masm 17%、SQL Server 18%、SakuraFrp 19%
+    —— 这些是"大画布 + 中间一小块内容"。直接缩到 40 / 48px 显示，
+    内容只剩 6~9 个像素，看起来就是"这个图标怎么这么小"。
+    裁掉四周的透明边距之后，所有图标的内容都会占满显示尺寸，大小就统一了。
+
+    整张图都透明时返回 None（调用方原样返回，不做裁剪）。
+    """
+    width, height = raw.width, raw.height
+    if width <= 0 or height <= 0:
+        return None
+    alpha = raw.bgra[3::4]
+    left, top, right, bottom = width, height, -1, -1
+    index = 0
+    for y in range(height):
+        row = alpha[index:index + width]
+        index += width
+        if not any(a > threshold for a in row):      # 整行透明，跳过
+            continue
+        if y < top:
+            top = y
+        bottom = y
+        start = 0
+        while start < width and row[start] <= threshold:
+            start += 1
+        end = width - 1
+        while end >= 0 and row[end] <= threshold:
+            end -= 1
+        if start < left:
+            left = start
+        if end > right:
+            right = end
+    if right < left or bottom < top:
+        return None
+    return left, top, right + 1, bottom + 1
+
+
+def crop_raw(raw: "RawIcon", box) -> "RawIcon":
+    """按外接框裁出一张新的 RawIcon（四周的全透明边距会被去掉）。"""
+    left, top, right, bottom = box
+    width, height = right - left, bottom - top
+    if width <= 0 or height <= 0:
+        return raw
+    if (left, top, right, bottom) == (0, 0, raw.width, raw.height):
+        return raw                                     # 本来就占满，不用动
+    stride = raw.width * 4
+    rows = [raw.bgra[y * stride + left * 4: y * stride + right * 4]
+            for y in range(top, bottom)]
+    return RawIcon(width, height, b"".join(rows), raw.key)
 
 
 def get_icon(path: "Path | str", size: int = 32,
@@ -493,6 +553,12 @@ def get_icon_best(path: "Path | str", size: int = 32,
 
     拿不到 jumbo（老系统 / 条目不存在）时**静默退回** `get_icon`，
     行为跟改动前完全一致，不会因为新路径失败而没图标。
+
+    **另外还会裁掉四周的透明边距**（见 `content_box`）：jumbo 是 256×256
+    的画布，可有些软件的图标只在中间画一小块（实测最小只占 12%），
+    不裁的话缩到 40 / 48px 显示，内容只剩几个像素——用户说的
+    "会出现图标太小的情况"就是这么来的。裁完之后所有图标的内容
+    都会占满显示尺寸，大小就统一了。
     """
     path = Path(path)
     key = icon_key(path, JUMBO_SIZE)
@@ -509,6 +575,13 @@ def get_icon_best(path: "Path | str", size: int = 32,
         raw = _jumbo_icon(Path(exe_hint))
     if raw is None or not raw.is_valid() or raw.width < 32:
         return get_icon(path, size, exe_hint)
+
+    # 裁掉四周的透明边距。jumbo 图是 256×256 的画布，但有些软件的图标
+    # 只在中间画一小块（实测最小只占 12%），不裁的话缩到显示尺寸后
+    # 内容只剩几个像素——"有的图标看着特别小"就是这么来的。
+    box = content_box(raw)
+    if box is not None:
+        raw = crop_raw(raw, box)
 
     raw = RawIcon(raw.width, raw.height, raw.bgra, key)
     _MEMORY[key] = raw

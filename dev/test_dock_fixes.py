@@ -21,6 +21,7 @@
 15. 菜单栏图标要用 256×256 的高清原图（旧路径只有 32×32）
 16. Config.move_to：把任意一项挪到任意位置
 17. 收纳面板的图标也走 256×256 高清（网格 + 常用启动行）
+18. 图标裁掉透明边距让内容占满（修「有的图标看着特别小」）+ 网格图标调小
 
 用法：python dev/test_dock_fixes.py
 """
@@ -686,17 +687,26 @@ def main() -> int:
 
     for button in dock._app_buttons:
         sizes = [s.width() for s in button.icon().availableSizes()]
+        # 阈值给 192 而不是 256：jumbo 档现在会**裁掉透明边距**，
+        # 成品尺寸本来就可能不到 256（系统文件夹实测是 256×224）。
+        # 旧路径只有 32，192 已经足够区分"确实走了高清档"。
         check(f"{Path(str(button._payload)).name} 用的是高清原图（{max(sizes)}px）",
-              max(sizes) >= 256, str(sizes))
+              max(sizes) >= 192, str(sizes))
     glyph_sizes = [s.width() for s in dock.desktop_btn.icon().availableSizes()]
     check(f"「桌面整理」矢量图标有多档尺寸（{len(glyph_sizes)} 档）",
           len(glyph_sizes) >= 5 and max(glyph_sizes) >= 192, str(glyph_sizes))
 
     link = Path(cfg.quick_items[0]["path"])
     best = icons_mod.get_icon_best(link, 44)
-    check("get_icon_best() 对 .lnk 能取到 256×256",
-          best is not None and best.width >= 256 and best.height >= 256,
+    check("get_icon_best() 对 .lnk 能取到高清原图（最长边 ≥192）",
+          best is not None and max(best.width, best.height) >= 192,
           f"{best.width}x{best.height}" if best else "None")
+    # 高清档必须**裁掉透明边距**：内容占满整张图，缩到显示尺寸才不会"看着小"
+    if best is not None:
+        box = icons_mod.content_box(best)
+        check("高清档已经裁掉透明边距（内容占满画布）",
+              box is None or box == (0, 0, best.width, best.height),
+              f"box={box} size={best.width}x{best.height}")
     # 老路径只有 32×32 —— 这正是"图标清晰度太低"的根因，钉住它别再退回去
     plain_icon = icons_mod.get_icon(link, 44)
     check("旧路径（SHGetFileInfoW）确实只有 32×32（所以必须走 jumbo）",
@@ -757,6 +767,47 @@ def main() -> int:
           str(sorted({item[3] for item in queued})))
     browser.loader._timer.stop()
     browser.loader._queue.clear()
+
+    print()
+    print("── 18. 图标裁剪：让内容占满画布（修「有的图标看着特别小」） ──")
+    import desktop_browser as db_mod
+
+    check(f"收纳面板网格图标调小了（GRID_ICON={db_mod.GRID_ICON}，原来 48）",
+          db_mod.GRID_ICON <= 44, str(db_mod.GRID_ICON))
+
+    def _solid(edge: int, inset: int) -> "icons_mod.RawIcon":
+        """造一张 edge×edge 的图，只有中间（去掉 inset 边距）是不透明的。"""
+        rows = []
+        for y in range(edge):
+            row = bytearray()
+            for x in range(edge):
+                inside = (inset <= x < edge - inset and inset <= y < edge - inset)
+                row += bytes((0, 0, 0, 255 if inside else 0))
+            rows.append(bytes(row))
+        return icons_mod.RawIcon(edge, edge, b"".join(rows), "probe")
+
+    # 64×64 画布、内容只在中间 16×16 —— 就是"大画布 + 小内容"那类图标
+    small = _solid(64, 24)
+    box = icons_mod.content_box(small)
+    check("content_box 能框出「大画布 + 中间小内容」",
+          box == (24, 24, 40, 40), str(box))
+
+    cropped = icons_mod.crop_raw(small, box)
+    check("crop_raw 裁完只剩内容（64×64 → 16×16）",
+          (cropped.width, cropped.height) == (16, 16),
+          f"{cropped.width}x{cropped.height}")
+    check("裁完之后再量一次：内容已经占满（不会再被裁）",
+          icons_mod.content_box(cropped) == (0, 0, 16, 16),
+          str(icons_mod.content_box(cropped)))
+
+    full_raw = _solid(64, 0)
+    full_box = icons_mod.content_box(full_raw)
+    check("本来就占满的图，外接框就是整张图",
+          full_box == (0, 0, 64, 64), str(full_box))
+    check("crop_raw 对「已经占满」的图原样返回（不白拷一遍）",
+          icons_mod.crop_raw(full_raw, full_box) is full_raw)
+    check("全透明的图返回 None（不裁，交给上层兜底）",
+          icons_mod.content_box(_solid(64, 32)) is None)
 
     print()
     print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")
