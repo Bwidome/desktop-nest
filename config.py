@@ -87,6 +87,21 @@ def desktop_dirs(include_public: bool = True) -> "list[tuple[Path, str]]":
 
 
 def default_project_dir() -> Path:
+    """程序目录。
+
+    **打包成 exe 后必须用 exe 自己所在的目录**，不能用 `__file__`。
+
+    原因：PyInstaller 的 onefile 会把整个包解到 `%TEMP%\\_MEIxxxx` 再运行，
+    那里面的 `__file__` 指向临时目录，**进程一退出就被删掉**。
+    拿它当"程序目录"的后果是：配置 / 缓存每次启动都从零开始 ——
+    表现就是"上次设的都忘了""图标每次都要重取一遍"，
+    而且会在 TEMP 里堆一堆没人清理的 `_MEI` 目录。
+    """
+    if getattr(sys, "frozen", False):
+        try:
+            return Path(sys.executable).resolve().parent
+        except Exception:
+            pass
     return Path(__file__).resolve().parent
 
 

@@ -7,6 +7,7 @@
 
 默认后台驻留系统托盘；加 --silent 则不弹任何窗口（开机自启用）。
 加 --selftest 只做启动自检、立刻退出（用来排查"双击没反应"）。
+加 --restore  只做应急还原、立刻退出（把收纳内容搬回桌面，不留任何窗口）。
 """
 
 from __future__ import annotations
@@ -190,11 +191,85 @@ def _selftest() -> int:
     return 0
 
 
+def _restore() -> int:
+    """把所有收纳内容搬回桌面，然后用弹窗汇报结果。
+
+    对应 `DesktopNest.exe --restore`。
+
+    为什么要做成入口参数而不是给一个 .bat：这是**应急通道**。
+    打包发行版的目标机器上不一定有 Python，一个依赖 python.exe 的
+    `还原桌面.bat` 在最需要它的时候恰恰用不了。
+    做进 exe 里就永远可用 —— 双击不了主程序时，命令行一条命令就能把
+    桌面还回来。
+    """
+    import config
+
+    try:
+        from qt_compat import QApplication, QMessageBox
+    except Exception:
+        return 1
+
+    app = QApplication.instance() or QApplication([sys.argv[0]])
+
+    try:
+        import nest
+        import restore_desktop as rd
+
+        user_desktop = config.get_desktop_dir()
+        root = rd.find_nest_with_content()
+        if root is None:
+            QMessageBox.information(
+                None, "桌面还原",
+                "没有找到需要还原的内容 —— 桌面应该已经是完整的。")
+            return 0
+        # 明确指向真正存着东西的那一份（可能不是 nest_root() 选中的那个）
+        nest.nest_root = lambda: root
+        store = nest.desktop_store()
+        items = sorted(p.name for p in store.iterdir())
+        result = nest.restore_to_desktop(user_desktop)
+
+        lines = [f"已还原 {result.moved} 项到桌面。", ""]
+        if result.skipped:
+            lines.append("说明：")
+            lines += [f"· {n}：{r}" for n, r in result.skipped[:6]]
+        if result.failed:
+            lines.append("")
+            lines.append("以下未能还原（文件仍在收纳目录里，没有丢）：")
+            lines += [f"· {n}：{r}" for n, r in result.failed[:6]]
+        lines.append("")
+        lines.append(f"收纳目录：{root}")
+        text = "\n".join(lines)
+        if result.failed:
+            QMessageBox.warning(None, "桌面还原", text)
+        else:
+            QMessageBox.information(None, "桌面还原", text)
+        return 0 if not result.failed else 1
+    except Exception:
+        detail = traceback.format_exc()
+        try:
+            config.log("命令行还原失败：\n" + detail)
+        except Exception:
+            pass
+        try:
+            QMessageBox.critical(
+                None, "桌面还原失败",
+                f"还原时出错：\n\n{detail.strip().splitlines()[-1]}\n\n"
+                f"文件仍在收纳目录里，没有丢。\n"
+                f"详情见日志：\n{config.log_path()}")
+        except Exception:
+            pass
+        return 1
+
+
 def main() -> int:
     _enable_crash_log()
 
-    if "--selftest" in sys.argv:
+    argv = sys.argv[1:]
+    if "--selftest" in argv:
         return _selftest()
+    # 应急还原：不启动托盘、不碰桌面，直接把收纳内容搬回去
+    if "--restore" in argv:
+        return _restore()
 
     try:
         import tray_app

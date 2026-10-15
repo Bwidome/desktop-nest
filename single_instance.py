@@ -100,6 +100,37 @@ _IS_WINDOWS = os.name == "nt"
 
 _APP_INSTANCE_CACHE = []
 
+_PROBE_RESULT: "bool | None" = None
+
+
+def _probe_local_socket() -> bool:
+    """本机到底能不能建本地套接字（结果缓存）。
+
+    受限环境（DSH 沙盒、某些加固过的企业策略）里 `QLocalServer.listen()`
+    会直接失败并报 `QLocalServerPrivate::addListener: 拒绝访问`。
+    这时"叫醒"通道不可用 —— 但那是**环境限制**，不是代码坏了：
+    互斥体（权威判据）照样工作，第二个实例仍会被挡住。
+
+    所以调用方（尤其测试）需要能区分这两种情况，而不是把环境问题
+    误判成功能缺陷。探测只做一次，建完立刻关掉。
+    """
+    global _PROBE_RESULT
+    if _PROBE_RESULT is not None:
+        return _PROBE_RESULT
+    if _QLocalServer is None:
+        _PROBE_RESULT = False
+        return False
+    name = f"{SOCKET_NAME}.probe"
+    try:
+        _QLocalServer.removeServer(name)
+        server = _QLocalServer()
+        _PROBE_RESULT = bool(server.listen(name))
+        server.close()
+        _QLocalServer.removeServer(name)
+    except Exception:
+        _PROBE_RESULT = False
+    return _PROBE_RESULT
+
 
 def _app_instance():
     """当前的 QCoreApplication（没有就返回 None）。

@@ -40,3 +40,6 @@ desktop.ini
 
 # ---- 离屏截图（test_nest --shots 生成，没有磨砂模糊，不进仓库）----
 shots/offscreen-*.png
+
+# 发行压缩包（大二进制，不作为源码仓库的一部分）
+desktop-nest-release-*.zip

@@ -399,6 +399,27 @@ def _jumbo_icon(path: Path) -> "RawIcon | None":
 # 缓存
 # --------------------------------------------------------------------------
 def cache_dir() -> Path:
+    """图标 PNG 缓存放哪。
+
+    **必须放在"稳定的"目录里**，所以走 `config.data_dir()`
+    （`%LOCALAPPDATA%\\DesktopNest`，不可写时退到程序目录 / TEMP）。
+
+    以前是 `Path(__file__).parent / ".icon-cache"`。打包成 onefile 之后
+    `__file__` 指向 `%TEMP%\\_MEIxxxx`，那个目录**进程退出即删** ——
+    缓存写进去等于没写，每次启动都要把几百个图标重新从 Shell 取一遍
+    （启动变慢），还会往 TEMP 里堆垃圾。
+
+    拿不到 config（极端情况）就退回旧行为，绝不让取图标整条链因为
+    目录问题挂掉。
+    """
+    try:
+        import config as _config
+
+        folder = _config.data_dir() / _CACHE_DIR_NAME
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+    except Exception:
+        pass
     folder = Path(__file__).resolve().parent / _CACHE_DIR_NAME
     try:
         folder.mkdir(parents=True, exist_ok=True)
