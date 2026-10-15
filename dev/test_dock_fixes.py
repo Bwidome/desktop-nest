@@ -727,18 +727,25 @@ def main() -> int:
     check("get_icon_best() 对 .lnk 能取到高清原图（最长边 ≥192）",
           best is not None and max(best.width, best.height) >= 192,
           f"{best.width}x{best.height}" if best else "None")
-    # 高清档必须**裁掉透明边距**：内容占满整张图，缩到显示尺寸才不会"看着小"。
-    # 但也不能"贴着内容裁"——边缘那圈 alpha 1~8 的淡投影会被切掉、图标像缺了一块，
-    # 所以 `trim_raw()` 会留 3% 的余量，这里放宽到"覆盖 90% 以上"。
+    # 高清档必须**裁掉多余透明边距**（内容太小的"看着特别小"，要裁掉四周空白），
+    # 同时**必须留出抗锯齿余量**——贴着内容裁会把边缘那圈淡投影切掉，
+    # 而且缩到 40px 时重采样没有外侧像素可采，圆形/圆角边缘就像被削掉一圈
+    # （用户报的"图标显示不完整、会少一部分"）。所以这里不再要求"覆盖 90%"，
+    # 改成两个方向都卡：内容够大（不是一张大画布贴个小图）、四周有余量。
     if best is not None:
         box = icons_mod.content_box(best)
         if box is None:
             covered = 1.0
+            gap = -1
         else:
             covered = min((box[2] - box[0]) / best.width,
                           (box[3] - box[1]) / best.height)
-        check(f"高清档已经裁掉透明边距（内容覆盖 {covered:.0%}）",
-              covered >= 0.90, f"box={box} size={best.width}x{best.height}")
+            gap = min(box[0], box[1],
+                      best.width - box[2], best.height - box[3])
+        check(f"高清档内容够大（覆盖 {covered:.0%}，不是大画布贴小图）",
+              covered >= 0.70, f"box={box} size={best.width}x{best.height}")
+        check(f"高清档四周留了抗锯齿余量（最小 {gap}px）",
+              gap >= 1, f"box={box} size={best.width}x{best.height}")
     # 老路径只有 32×32 —— 这正是"图标清晰度太低"的根因，钉住它别再退回去
     plain_icon = icons_mod.get_icon(link, 44)
     check("旧路径（SHGetFileInfoW）确实只有 32×32（所以必须走 jumbo）",

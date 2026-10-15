@@ -173,8 +173,8 @@ def main() -> int:
     check("裁剪比例已提到 6%", icons.CROP_PAD_RATIO >= 0.06,
           str(icons.CROP_PAD_RATIO))
     check("保底余量 >= 4px", icons.CROP_PAD_MIN >= 4, str(icons.CROP_PAD_MIN))
-    check("缓存版本已升到 v4（旧裁坏的缓存会失效）",
-          icons.CACHE_VERSION == "v4", icons.CACHE_VERSION)
+    check("缓存版本已升到 v5（旧裁坏的缓存会失效）",
+          icons.CACHE_VERSION == "v5", icons.CACHE_VERSION)
     # 版本号必须真的参与 key 计算，否则升版本没用
     _probe = desktop / "软件0.lnk"
     _key_now = icons.icon_key(_probe, 256)

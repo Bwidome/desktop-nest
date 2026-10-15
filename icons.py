@@ -434,7 +434,9 @@ def cache_dir() -> Path:
 #   v3：高清档改成"Shell jumbo 与 exe 资源段抽图二选一"
 #   v4：裁剪余量从"3% + 保底 1px"提到"6% + 保底 4px"，
 #       修"有些软件图标会少几个边角"
-CACHE_VERSION = "v4"
+#   v5：内容顶到画布四边时改为**向外补一圈透明余量**（`expand_raw`），
+#       修"收纳面板图标显示不完整、会少一部分"
+CACHE_VERSION = "v5"
 
 
 def icon_key(path: Path, size: int) -> str:
@@ -570,19 +572,87 @@ CROP_PAD_RATIO = 0.06
 CROP_PAD_MIN = 4
 
 
+def expand_raw(raw: "RawIcon", pad: int) -> "RawIcon":
+    """四周**补一圈全透明像素**，把画布扩大 `pad` 个像素。
+
+    为什么需要"反向扩展"（用户报的"收纳面板图标显示不完整、会少一部分"）：
+    有些图标**内容严丝合缝顶到画布四边**（Discord / Apifox / MuMu 实测
+    最外两行两列就有 alpha=255 的像素）。这种情况 `trim_raw` 的 `pad`
+    是**完全失效**的 —— `left - pad` 被 `max(0, ...)` 夹回 0、
+    `right + pad` 被 `min(width, ...)` 夹回 width，裁剪窗口就等于整张画布，
+    一点余量都没留出来。
+
+    于是缩放时就出事了：目标只有 40px，`SmoothTransformation` 在边界处
+    **没有外侧像素可采样**，边缘那圈抗锯齿过渡被直接丢弃 ——
+    圆形、圆角、异形轮廓的边缘看起来就像被削掉一圈（"少一部分"）。
+
+    补一圈透明像素之后，重采样窗口在边界外侧有正式的透明值可采，
+    边缘过渡就能被完整保留。
+    """
+    pad = int(pad)
+    if pad <= 0 or raw.width <= 0 or raw.height <= 0:
+        return raw
+    width = raw.width + pad * 2
+    height = raw.height + pad * 2
+    row_bytes = raw.width * 4
+    blank = b"\x00" * (pad * 4)
+    stride = width * 4
+    rows = []
+    for index in range(raw.height):
+        rows.append(blank + raw.bgra[index * row_bytes:(index + 1) * row_bytes]
+                    + blank)
+    data = b"\x00" * (stride * pad) + b"".join(rows) + b"\x00" * (stride * pad)
+    return RawIcon(width, height, data, raw.key)
+
+
 def trim_raw(raw: "RawIcon", threshold: int = 8) -> "RawIcon":
-    """裁掉透明边距，并**在四周留一点余量**。拿不到外接框就原样返回。"""
+    """把内容摆正到画布中间，并**保证四周一定有余量**。
+
+    做两件事，缺一不可：
+
+    1. **裁掉多余透明边距**（"有的图标看着特别小"）—— 有些图标是
+       256×256 画布只画中间一小块（实测 Cpolar / Masm / SQL Server 的
+       Shell jumbo 版本只占 2.6%~3.2%），不裁的话缩到 40px 后内容只剩几个像素。
+    2. **保证四周留出 `pad` 的透明余量**（"图标显示不完整、少一部分"）——
+       内容贴边时 `pad` 会失效（见 `expand_raw` 的说明），
+       这时要反过来**向外补一圈透明像素**，让缩放的采样窗口有东西可采。
+
+    拿不到外接框（整张全透明）就原样返回。
+    """
     box = content_box(raw, threshold)
     if box is None:
         return raw
     left, top, right, bottom = box
+    # ⚠️ pad 一律按**内容**尺寸算，不能按画布尺寸算。
+    # 按画布算的话，`expand_raw` 扩张之后画布变大 → 下一次算出的 pad 也变大
+    # → 又补一圈 → 画布再变大 …… 不收敛（实测 286 → 290 → …）。
+    # 按内容算则结果稳定：内容是多大，pad 就是多大，重复调用保持幂等。
+    content_side = max(right - left, bottom - top)
     pad = max(CROP_PAD_MIN,
-              int(round(max(raw.width, raw.height) * CROP_PAD_RATIO)))
-    left = max(0, left - pad)
-    top = max(0, top - pad)
-    right = min(raw.width, right + pad)
-    bottom = min(raw.height, bottom + pad)
-    return crop_raw(raw, (left, top, right, bottom))
+              int(round(content_side * CROP_PAD_RATIO)))
+
+    # 内容占不到整张画布 → 正常裁剪（裁到"内容 + pad"）
+    start_x = max(0, left - pad)
+    start_y = max(0, top - pad)
+    end_x = min(raw.width, right + pad)
+    end_y = min(raw.height, bottom + pad)
+    cropped = crop_raw(raw, (start_x, start_y, end_x, end_y))
+    if cropped is not raw:
+        raw = cropped
+
+    # 裁完再看四边是否真的留够了。内容本来就贴边的那些，
+    # 上面这一步等于什么也没做 —— 这时候反过来补透明像素。
+    inner = content_box(raw, threshold)
+    if inner is None:
+        return raw
+    gap = pad
+    gap = min(gap, inner[0])
+    gap = min(gap, inner[1])
+    gap = min(gap, raw.width - inner[2])
+    gap = min(gap, raw.height - inner[3])
+    if gap < pad:
+        raw = expand_raw(raw, pad - gap)
+    return raw
 
 
 def get_icon(path: "Path | str", size: int = 32,

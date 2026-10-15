@@ -248,6 +248,25 @@ def main() -> int:
     check("QtNetwork 可用（叫醒通道可用）", si._QLocalServer is not None,
           si._QT_NETWORK_ERROR)
 
+    # ⚠️ B 节需要"本进程能拿到那把锁"。如果用户此刻正开着「桌面收纳」，
+    # 锁被它占着 —— 那是**闸门在正常工作**，不是回归。
+    # 所以这里不硬用生产的名字，而是**换一个不冲突的探测名字**跑完整链路：
+    # 既不会和用户正在跑的程序打架，又能把 B1/B2 的每一条都真验到。
+    probe = si.SingleInstance()
+    external_running = not probe.try_acquire()
+    probe.close()
+    if external_running:
+        print("  ℹ  检测到已有「桌面收纳」在运行（锁被它占着）——"
+              "改用独立探测名字跑，避免和它打架")
+        # 换名字：把 _USER 替换掉，同时重置已经算好的常量
+        si.BASE_KEY = si.BASE_KEY + ".probe"
+        si.MUTEX_NAME = f"Global\\{si.BASE_KEY}.{si._USER}"
+        si.SOCKET_NAME = f"{si.BASE_KEY}.{si._USER}"
+        check("单实例闸确实挡住了本进程（说明它真的生效）", True)
+    check("探测名字和生产的那个不冲突",
+          si.MUTEX_NAME != f"Global\\DesktopNest.SingleInstance.v1.{si._USER}"
+          or not external_running)
+
     first = si.SingleInstance()
     check("第一个实例拿到锁", first.try_acquire())
     second = si.SingleInstance()
@@ -278,14 +297,20 @@ def main() -> int:
 
     print()
     print("── B2. 单实例：跨进程才作数 ──")
+    # 子进程要用**同一个**探测名字，否则它去抢生产名字，会跟用户
+    # 正开着的那个程序打架（表现就是这里报 BUSY，假失败）。
     child_code = (
         "import sys, time\n"
         "sys.path.insert(0, r'%s')\n"
         "sys.path.insert(0, r'%s')\n"
         "import single_instance\n"
+        "single_instance.BASE_KEY = %r\n"
+        "single_instance.MUTEX_NAME = r'%s'\n"
+        "single_instance.SOCKET_NAME = r'%s'\n"
         "guard = single_instance.SingleInstance()\n"
         "print('ACQUIRED' if guard.try_acquire() else 'BUSY', flush=True)\n"
-        "time.sleep(12)\n" % (HERE, HERE / "libs"))
+        "time.sleep(12)\n" % (HERE, HERE / "libs", si.BASE_KEY,
+                              si.MUTEX_NAME, si.SOCKET_NAME))
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
     child = subprocess.Popen([sys.executable, "-c", child_code],
@@ -407,6 +432,11 @@ def main() -> int:
           proc.stderr[-400:])
 
     # ==================================================================
+    return _finish()
+
+
+def _finish() -> int:
+    """收尾：打印汇总。B 节提前跳过时也走这里，保证输出口径一致。"""
     print()
     print(f"通过 {len(PASS)} 项，失败 {len(FAIL)} 项")
     for item in FAIL:

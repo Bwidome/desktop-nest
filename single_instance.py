@@ -224,10 +224,15 @@ def _close_handle(handle: int) -> None:
 class SingleInstance:
     """一次进程生命周期里只该有一个的"锁"。"""
 
-    def __init__(self, mutex_name: str = MUTEX_NAME,
-                 socket_name: str = SOCKET_NAME):
-        self._mutex_name = mutex_name
-        self._socket_name = socket_name
+    def __init__(self, mutex_name: "str | None" = None,
+                 socket_name: "str | None" = None):
+        # ⚠️ 名字必须**在这儿现取**，不能写成
+        # `def __init__(self, mutex_name: str = MUTEX_NAME, ...)`。
+        # Python 的默认参数是在**函数定义那一刻**求值的，之后改模块里的
+        # `MUTEX_NAME` 对它毫无影响 —— 测试想换个不冲突的探测名字就会失效
+        # （表现为"明明改了名字，拿到的还是生产的那把锁"）。
+        self._mutex_name = MUTEX_NAME if mutex_name is None else mutex_name
+        self._socket_name = SOCKET_NAME if socket_name is None else socket_name
         self._mutex = None
         self._server = None
         self._held = False
