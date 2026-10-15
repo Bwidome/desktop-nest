@@ -125,8 +125,30 @@ def _selftest() -> int:
         icon = app_icon()
         return f"{len(icon.availableSizes())} 种尺寸"
 
+    @step("单实例闸可用")
+    def _5b():
+        import single_instance
+
+        guard = single_instance.SingleInstance()
+        if not guard.try_acquire():
+            # 自检会构造一个 TrayApp 再关掉它，而 TrayApp 的构造 / 关闭
+            # 会**把桌面收进来再放回去**。正在跑的那个实例干的是同一件事，
+            # 两边一起动手就是抢文件——所以这里必须直接停下，
+            # 而不是"带病继续跑完"。
+            raise RuntimeError(
+                "已经有「桌面收纳」在运行。\n"
+                "        自检会构造并关闭一个实例（退出时会还原桌面），\n"
+                "        和正在跑的那个抢同一批桌面文件，所以这里主动停下。\n"
+                "        请先从托盘退出那个实例，再跑自检。")
+        keepalive["guard"] = guard
+        return single_instance.describe()
+
     @step("构造 TrayApp")
     def _6():
+        # 上一步没拿到单实例锁就**别往下走**：`step` 会吞掉异常继续跑，
+        # 而"构造 TrayApp"正是会动桌面文件的那一步。
+        if keepalive.get("guard") is None:
+            raise RuntimeError("单实例闸没通过，跳过（避免和正在运行的实例抢桌面文件）")
         import config
         import tray_app
 

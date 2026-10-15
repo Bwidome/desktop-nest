@@ -27,6 +27,7 @@ import config
 import engine
 import nest
 import safety
+import single_instance
 import theme as theme_mod
 from desktop_browser import DesktopBrowser
 from dock import DockBar
@@ -933,6 +934,30 @@ class TrayApp(QWidget):
         self.tray.hide()
         QApplication.quit()
 
+    def on_second_launch(self, command: str = "show") -> None:
+        """又有人启动了一次：把面板亮出来，顺便说一声"程序已经在跑了"。
+
+        这是单实例闸的配套体验。第二个进程会被 `single_instance` 挡在
+        `TrayApp` 构造之前（那里会 `auto_take_desktop()`，让它跑下去就是
+        两个进程抢同一批桌面文件），然后通过本地套接字叫我们一声——
+        总比让用户对着"双击了没反应"发呆强。
+        """
+        if command not in ("", "show"):
+            return
+        try:
+            self.open_panel()
+        except Exception as exc:  # noqa: BLE001
+            config.log(f"响应重复启动失败：{type(exc).__name__}: {exc}")
+        try:
+            self.tray.showMessage(
+                f"{config.APP_NAME_FULL} 已经在运行",
+                "没有重复启动，这就是已经在跑的那一个。\n"
+                "主面板已经给你打开了；平时也可以点屏幕底部菜单栏最左边的"
+                "「桌面整理」。",
+                QSystemTrayIcon.MessageIcon.Information, 5000)
+        except Exception:
+            pass
+
     def shutdown(self) -> None:
         """退出前：还原桌面 + 把后台线程收干净。"""
         worker = self._scan
@@ -966,6 +991,22 @@ class TrayApp(QWidget):
                 QSystemTrayIcon.MessageIcon.Information, 6000)
 
 
+def _tell_already_running() -> None:
+    """叫不醒已经在跑的那个时，至少弹一句"程序已经开着"。
+
+    只在用户**手动**双击的情况下弹。`--silent` 是开机自启，
+    弹一个模态框出来只会吓人一跳，所以那种情况下安静退出就好。
+    """
+    try:
+        QMessageBox.information(
+            None, f"{config.APP_NAME_FULL} 已经在运行",
+            "程序已经在运行了，不用再开一个。\n\n"
+            "它常驻在右下角的系统托盘里：右键托盘图标就能打开主面板，\n"
+            "屏幕底部那条菜单栏也可以直接点。")
+    except Exception:
+        pass
+
+
 # --------------------------------------------------------------------------
 def run() -> int:
     from qt_compat import require_qt
@@ -981,11 +1022,30 @@ def run() -> int:
     app.setApplicationDisplayName(config.APP_NAME_FULL)
     app.setQuitOnLastWindowClosed(False)         # 关掉窗口也要留在托盘
 
+    # ---- 单实例闸（必须在构造 TrayApp 之前）----
+    # 为什么这么靠前：`TrayApp.__init__` 里会 `auto_take_desktop()`（把桌面收进
+    # 收纳目录），退出时又会 `restore_desktop_on_exit()`（再放回去）。
+    # 第二个实例要是走到那一步，就是两个进程抢同一批文件；而且会多出
+    # 一个托盘图标 + 一条菜单栏浮在屏幕上，用户根本分不清点哪个。
+    guard = single_instance.SingleInstance()
+    if not guard.try_acquire():
+        woken = guard.send_to_running("show")
+        config.log("已有实例在运行（%s），本次启动直接退出"
+                   % ("已把它的面板叫出来" if woken else "叫醒失败"))
+        if not woken and not silent:
+            _tell_already_running()
+        guard.close()
+        return 0
+
     cfg = config.Config()
     app.setStyleSheet(theme_mod.stylesheet(bool(cfg.get("dark"))))
 
     window = TrayApp(cfg, silent=silent)
     window._app = app
+    # 把守卫挂到窗口上：既让"第二个实例叫醒我们"这条通道接上，
+    # 也保证守卫对象不会在 `run()` 作用域里被提前回收。
+    window._single_instance = guard
+    guard.on_message = window.on_second_launch
     # 挂上全局异常钩子：之后任何未捕获异常都会**先把桌面还原回去**再退出。
     # 必须在进入事件循环之前装好，否则启动阶段崩掉就没有兜底。
     window.install_crash_guards()
@@ -1006,6 +1066,9 @@ def run() -> int:
             window.emergency_restore("事件循环结束")
         except Exception:
             pass
+        # 互斥体是内核对象、进程一结束系统就会回收，这里显式放掉只是
+        # 为了让"同一个进程里再启动一次"能立刻成功（自检里会这么用）。
+        guard.close()
 
 
 if __name__ == "__main__":

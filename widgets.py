@@ -210,6 +210,13 @@ class IconLoader(QWidget):
 
     ready = Signal(str, object)          # (key, QIcon)
 
+    # 取不到图标时最多重试几次（见 `_drain`）。
+    # 每次重试都排到队尾、**并且至少等到下一个 tick**（见 `_drain` 里的
+    # `budget`），所以 6 次 ≈ 6 个 tick（默认 50ms 一个）≈ 300ms。
+    # 足够跨过"文件正在被搬动 / 刚落到磁盘上"这个窗口期，
+    # 又不会在文件真的没了时白转半天。
+    MAX_TRIES = 6
+
     def __init__(self, parent=None, interval: int = 50, per_tick: int = 6):
         super().__init__(parent)
         self._per_tick = per_tick
@@ -217,8 +224,8 @@ class IconLoader(QWidget):
         self._timer.setInterval(interval)
         self._timer.timeout.connect(self._drain)
         self._cache: "dict[str, tuple[str, QIcon]]" = {}
-        # (key, path, exe_hint, size, fallback_text, hi_res, stamp)
-        self._queue: "list[tuple[str, Path, Path | None, int, str, bool, str]]" = []
+        # (key, path, exe_hint, size, fallback_text, hi_res, stamp, resolve, tries)
+        self._queue: "list[tuple]" = []
 
     @staticmethod
     def _stamp(path: Path, size: int) -> str:
@@ -228,12 +235,24 @@ class IconLoader(QWidget):
         except Exception:
             return ""
 
+    @staticmethod
+    def _resolve_now(resolve, fallback: Path) -> Path:
+        """问一下 resolver"现在该读哪个文件"。没有 resolver 就用原样。"""
+        if resolve is None:
+            return fallback
+        try:
+            fresh = resolve()
+        except Exception:
+            return fallback
+        return Path(fresh) if fresh is not None else fallback
+
     def cached(self, key: str) -> "QIcon | None":
         entry = self._cache.get(key)
         return entry[1] if entry else None
 
     def request(self, key: str, path: Path, exe_hint: "Path | None", size: int,
-                fallback_text: str = "", hi_res: bool = False) -> None:
+                fallback_text: str = "", hi_res: bool = False,
+                resolve=None) -> None:
         """排一个取图标的活。
 
         `hi_res=True` 走 `icons.get_icon_best()`——两条高清来源都试，
@@ -245,7 +264,21 @@ class IconLoader(QWidget):
         那个文件**——两者可以不同：常用软件记的是收纳目录里的路径，
         而程序刚启动时那个文件还没被收进来，这时调用方会把桌面上的"孪生"
         路径传进来取图，身份仍然是原来那个。
+
+        `resolve`（可选）是一个"现算该读哪个文件"的回调，返回 `Path | None`。
+        **这是"菜单栏常用软件图标在启动时不能正常加载"的根因修复**：
+        调用方排队的那一刻文件在哪，和真正轮到它取图时文件在哪，**可能不是
+        同一个地方**——本程序启动流程正是如此：
+
+            构造 DockBar（排队取图标，这时常用软件还躺在桌面上）
+              → auto_take_desktop()（把它们搬进收纳目录）
+              → app.exec()（取图标的定时器这时才第一次跑）
+
+        搬完之后，排队时记下的那个桌面路径已经不存在了，`icons` 会直接
+        返回 None，于是每个常用项都停在占位字母上。传了 `resolve` 之后，
+        每次取图前都**重新问一遍**，就自然读到搬过去的那一份了。
         """
+        path = self._resolve_now(resolve, Path(path))
         stamp = self._stamp(path, size)
         entry = self._cache.get(key)
         if entry is not None and entry[0] == stamp:
@@ -254,7 +287,7 @@ class IconLoader(QWidget):
             if existing[0] == key and existing[6] == stamp:
                 return
         self._queue.append((key, path, exe_hint, size, fallback_text, hi_res,
-                            stamp))
+                            stamp, resolve, 0))
         if not self._timer.isActive():
             self._timer.start()
 
@@ -263,28 +296,76 @@ class IconLoader(QWidget):
         self._cache.pop(key, None)
 
     def _drain(self) -> None:
-        for _ in range(self._per_tick):
+        # ⚠️ 这一轮**只处理开始时就已经在队里的那些**。
+        # 不能写成 `for _ in range(self._per_tick)`：取失败会把请求排回队尾，
+        # 那个循环会立刻把它再弹出来——几次重试在**同一个 tick 里**就烧光了，
+        # 等于没有重试（"文件晚一步出现"照样补不回来）。
+        budget = min(self._per_tick, len(self._queue))
+        for _ in range(budget):
             if not self._queue:
-                self._timer.stop()
-                return
-            key, path, hint, size, fallback, hi_res, stamp = self._queue.pop(0)
+                break
+            item = self._queue.pop(0)
+            key, path, hint, size, fallback, hi_res, stamp, resolve, tries = item
+
+            # 排队到真正取图之间，文件可能已经被搬到别处了（见 `request()`
+            # 的说明）。所以取图之前**重新问一遍**该读哪个文件，而不是
+            # 用排队那一刻的快照。
+            fresh = self._resolve_now(resolve, path)
+            if fresh != path:
+                path = fresh
+                stamp = self._stamp(path, size)
+                # 目标文件变了，原来算的 hint（.lnk 指向的 exe）也可能不对了
+                hint = None
+
             entry = self._cache.get(key)
             if entry is not None and entry[0] == stamp:
                 continue
+
+            if hi_res and hint is None:
+                # 高清档才顺手解析 .lnk 的目标：这两处（菜单栏、收纳面板常用排）
+                # 总共就几十项，多读一次小文件换一张清晰得多的图标是值的。
+                # 主面板那种一次几百个 16px 小图标的列表不走这一步，省时间。
+                hint = icon_hint_for(path)
+
+            icon = self._load(path, hint, size, hi_res)
+            if icon is not None:
+                self._cache[key] = (stamp, icon)
+                self.ready.emit(key, icon)
+                continue
+
+            # 取不到：**不写缓存**，调用方继续用它的占位块。
+            # 写进去的话，"文件还没到位"这一刻的失败就会被钉死一整个会话
+            # （"加了常用软件之后图标一直是白纸"就是这么来的）。
+            #
+            # 但光"不写缓存"不够——没人会再调 `request()` 了，占位块就永远
+            # 留在那儿。所以自己排到队尾再试几次：文件正在被搬动 / 还没落盘
+            # 这种短暂状态，几个 tick 之后就正常了。
+            if tries + 1 < self.MAX_TRIES:
+                self._queue.append((key, path, hint, size, fallback, hi_res,
+                                    stamp, resolve, tries + 1))
+                if not self._timer.isActive():
+                    self._timer.start()
+
+        # 队空了就把定时器停掉（重试会把请求排回队里，所以这里要重新看一次，
+        # 不能像以前那样在循环里 `return`）。
+        if not self._queue:
+            self._timer.stop()
+
+    def _load(self, path: Path, hint: "Path | None", size: int, hi_res: bool):
+        """真正去取一张图标，转成 QIcon；取不到返回 None。"""
+        try:
             if hi_res:
                 raw = icons.get_icon_best(path, size, exe_hint=hint)
             else:
                 raw = icons.get_icon(path, size, exe_hint=hint)
-            icon = None
-            if raw is not None and getattr(raw, "is_valid", lambda: False)():
-                icon = raw_to_qicon(raw)
-            if icon is None:
-                # 真图标取不到：**不写缓存**，调用方继续用它的占位块。
-                # 写进去的话，"文件还没到位"这一刻的失败就会被钉死一整个会话
-                # （"加了常用软件之后图标一直是白纸"就是这么来的）。
-                continue
-            self._cache[key] = (stamp, icon)
-            self.ready.emit(key, icon)
+        except Exception:
+            return None
+        if raw is None or not getattr(raw, "is_valid", lambda: False)():
+            return None
+        try:
+            return raw_to_qicon(raw)
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------
     # 清理

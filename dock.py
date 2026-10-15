@@ -718,18 +718,21 @@ class DockBar(QWidget):
     def _queue_icons(self) -> None:
         for entry in self.cfg.quick_items:
             path = Path(entry["path"])
-            # 本体不在就用孪生路径（桌面 ↔ 收纳目录）。常用软件记的是
-            # "上次它在的位置"，程序刚启动、东西还没收进来时那个路径不存在，
-            # 直接去取 Shell 会回一张"未知文件类型"的白纸图标。
-            source = nest.icon_source(path, self.cfg.desktop)
-            if source is None:
-                continue                 # 两边都没有：留着占位块，下次重建再取
-            hint = (engine.resolve_shortcut_target(source)
-                    if source.suffix.lower() == ".lnk" else None)
+            # 传给 loader 的是**身份路径**（配置里记着的那个）；真正该读哪个
+            # 文件交给 `resolve` 在**取图那一刻**现算——见 IconLoader.request()。
+            #
+            # 这里以前是在排队时就把 `nest.icon_source()` 算死，结果是程序
+            # 启动时全部取不到图：菜单栏先建好（常用软件还躺在桌面上），
+            # 紧接着 `auto_take_desktop()` 把它们搬进收纳目录，
+            # 等取图标的定时器第一次跑起来，排队时记的桌面路径早就没了。
+            # 表现就是"打开软件后菜单栏的常用软件图标不能正常加载"。
+            #
             # hi_res=True：菜单栏图标要放大显示，必须拿 256×256 的原图再缩，
             # 否则就是把 32×32 硬拉大（"图标清晰度太低"的根因）。
-            self.loader.request(str(path), source, hint, self._icon_size,
-                                entry["name"] or path.name, hi_res=True)
+            self.loader.request(
+                str(path), path, None, self._icon_size,
+                entry["name"] or path.name, hi_res=True,
+                resolve=lambda p=path: nest.icon_source(p, self.cfg.desktop))
 
     def _on_icon_ready(self, key: str, icon) -> None:
         for button in self._buttons:

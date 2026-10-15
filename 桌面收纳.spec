@@ -23,6 +23,13 @@
 4. **不打包运行期目录**
    `.data` / `.desktop-nest` / `.icon-cache` 是运行时生成的，
    不要打进成品（之前误打进去了，会导致"配置被固化"）。
+
+5. **hiddenimports 里必须有 `PyQt6.QtNetwork`**
+   `single_instance.py` 里那句 `from PyQt6.QtNetwork import ...` 是写在
+   `try/except` 里的（拿不到就降级成"只拦不叫醒"），PyInstaller 的静态分析
+   容易把这种"包在异常处理里的可选依赖"整个漏掉。漏掉的后果不是崩溃，
+   而是**第二个实例被挡住之后，第一个实例不会亮面板**——用户看到的是
+   "双击了没反应"。显式写进 hiddenimports 才能带上那个 200KB 左右的 pyd。
 """
 
 a = Analysis(
@@ -30,7 +37,11 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[],                      # ← 不塞 libs
-    hiddenimports=[],
+    hiddenimports=[
+        # 单实例的"叫醒"通道（见文件头第 5 条）。包在 try/except 里的可选依赖，
+        # 不显式列出来会被静态分析漏掉。
+        'PyQt6.QtNetwork',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -692,27 +692,25 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         （`AppButton` 是 `setIcon`、`ItemTile` 是 `set_icon`，所以传一个
         setter 进来，而不是硬编码某个方法名。）
 
-        两个关键点：
+        **本体不在就用孪生路径**。常用软件记的是"上次它在的位置"，
+        程序刚启动、东西还没收进来时那个路径是不存在的；直接去取，
+        Shell 会回一张"未知文件类型"的白纸图标。
 
-        1. **本体不在就用孪生路径**。常用软件记的是"上次它在的位置"，
-           程序刚启动、东西还没收进来时那个路径是不存在的；直接去取，
-           Shell 会回一张"未知文件类型"的白纸图标。`nest.icon_source()`
-           会自动改读桌面上的那一份，图标立刻就是对的。
-        2. **两边都没有就干脆不请求**，让控件留着占位色块。
-           这样不会把"暂时取不到"钉进缓存，等下一次重建（收完桌面）
-           再取就是真图标了。
+        ⚠️ 这个"该读哪一份"的判断**不能在这里定死**：面板建好的那一刻
+        和真正轮到取图的那一刻，文件可能已经在两个地方之间搬过一趟了
+        （启动流程正是如此）。所以传一个 `resolve` 回调给 loader，
+        让它每次取图前**现算**——见 `widgets.IconLoader.request()`。
         """
         cached_icon = self.loader.cached(key)
         if cached_icon is not None:
             setter(cached_icon)
-        source = nest.icon_source(path, self.cfg.desktop)
-        if source is None:
-            return
         # hi_res=True：这一排要显示 APP_ICON(34px) 的图标，
         # 而 SHGetFileInfoW 顶天只给 32×32，硬拉到 34 就糊了。
         # 走 get_icon_best() 拿 256×256 原图再由 Qt 缩下来。
-        self.loader.request(key, source, icon_hint_for(source),
-                            ICON_REQUEST, name, hi_res=True)
+        # hint 传 None：loader 会在取图时按解析出来的那个路径去解析 .lnk 目标。
+        self.loader.request(
+            key, path, None, ICON_REQUEST, name, hi_res=True,
+            resolve=lambda p=path: nest.icon_source(p, self.cfg.desktop))
 
     def _attach_quick_badge(self, button: AppButton, path: Path) -> None:
         """给"常用软件"挂上左上角的减号（只在管理模式里露出来）。"""
