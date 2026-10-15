@@ -406,6 +406,8 @@ class DockBar(QWidget):
         self._press_in_window = QPoint(0, 0)
         self._reorder_from = 0
         self._reorder_to = 0
+        # 松手时的全局坐标：用来判断"是不是拖到菜单栏外面了"（需求2）
+        self._release_pos: "QPoint | None" = None
         self._drop_line: "QFrame | None" = None
 
         # 布局稳定后校正位置用的短定时器（见 _settle）
@@ -918,30 +920,53 @@ class DockBar(QWidget):
     # ------------------------------------------------------------------
     # 位置
     # ------------------------------------------------------------------
+    def _saved_pos(self) -> "tuple[int | None, int | None]":
+        """上次记下的位置 `(x, y)`；没记过或值坏了就返回 `(None, None)`。"""
+        def _read(key: str) -> "int | None":
+            raw = self.cfg.get(key)
+            if raw is None:
+                return None
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return None
+        return _read("dock_x"), _read("dock_y")
+
     def reposition(self) -> None:
-        """贴到屏幕底部居中（或恢复上次水平位置），并保证完整落在屏幕内。"""
+        """按记住的位置摆放菜单栏，并保证它完整落在屏幕内。
+
+        需求：「菜单栏应该可以自由移动而不是只能在底下移动」。
+        所以横向、纵向都听 `dock_x` / `dock_y` 的；**从来没拖过**时才贴底居中
+        （保持开箱即用的默认观感）。
+        """
         screen = self.screen().availableGeometry()
         width, height = self.width(), self.height()
-        # 兜底：万一还是比屏幕宽，先压缩到屏幕内，别让内容跑到屏幕外
+        # 兜底：万一比屏幕还大，先压缩到屏幕内，别让内容跑到屏幕外
         if width > screen.width():
             width = screen.width() - 20
+        if height > screen.height():
+            height = screen.height() - 20
+        if (width, height) != (self.width(), self.height()):
             self.resize(width, height)
 
-        saved = self.cfg.get("dock_x")
-        if saved is None:
+        saved_x, saved_y = self._saved_pos()
+        if saved_x is None:
             x = screen.center().x() - width // 2
         else:
-            try:
-                x = int(saved)
-            except (TypeError, ValueError):
-                x = screen.center().x() - width // 2
+            x = saved_x
+        if saved_y is None:
+            y = screen.bottom() - height - 2      # 默认贴底
+        else:
+            y = saved_y
 
         # 关键：上限必须不小于下限，否则 min/max 会互相顶掉，
         # 结果是窗口直接被推到屏幕外面去。
         left_limit = screen.left() + 4
         right_limit = max(left_limit, screen.right() - width - 4)
+        top_limit = screen.top() + 4
+        bottom_limit = max(top_limit, screen.bottom() - height - 4)
         x = max(left_limit, min(x, right_limit))
-        y = screen.bottom() - height - 2
+        y = max(top_limit, min(y, bottom_limit))
         self.move(x, y)
 
     def showEvent(self, event) -> None:  # noqa: N802
@@ -987,19 +1012,24 @@ class DockBar(QWidget):
             self._press_icon.setCursor(Qt.CursorShape.ClosedHandCursor)
 
     def _apply_drag(self, global_pos: QPoint) -> None:
-        """拖动中：**只改水平位置**。
+        """拖动中：**横竖都跟着鼠标走**。
 
-        菜单栏是"贴底工具条"，纵向位置由 `reposition()` 统一管（永远贴底）。
-        如果这里跟着鼠标上下跑，松手时又会被 `reposition()` 弹回底部，
-        看起来像"拖到一半自己跳回去"。所以拖动只沿底边走，位置存 `dock_x`。
+        需求：「菜单栏应该可以自由移动而不是只能在底下移动」。
+        早先这里只改 x、纵坐标交给 `reposition()` 贴底，理由是"贴底工具条"；
+        现在改成自由摆放，所以 y 也要跟着动，并同样夹在屏幕可用区里，
+        避免拖到屏幕外面找不回来。
         """
         if self._drag_offset is None:
             return
         screen = self.screen().availableGeometry()
         x = global_pos.x() - self._drag_offset.x()
+        y = global_pos.y() - self._drag_offset.y()
         left_limit = screen.left() + 4
         right_limit = max(left_limit, screen.right() - self.width() - 4)
-        self.move(max(left_limit, min(x, right_limit)), self.y())
+        top_limit = screen.top() + 4
+        bottom_limit = max(top_limit, screen.bottom() - self.height() - 4)
+        self.move(max(left_limit, min(x, right_limit)),
+                  max(top_limit, min(y, bottom_limit)))
 
     def _on_icon_press(self, button: DockIcon, global_pos: QPoint) -> None:
         self._mode = ""
@@ -1042,6 +1072,8 @@ class DockBar(QWidget):
         mode = self._mode
         self._mode = ""
         self._press_icon = None
+        # 记下松手位置：排序时用它判断有没有拖到菜单栏外面（需求2）
+        self._release_pos = QPoint(global_pos)
         if mode == "reorder":
             button.setDown(False)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1049,7 +1081,9 @@ class DockBar(QWidget):
         elif mode == "window":
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             self._drag_offset = None
+            # 横竖都记：下次启动回到你放的位置（需求1：自由移动）
             self.cfg.set("dock_x", self.x())
+            self.cfg.set("dock_y", self.y())
             self.reposition()
         # mode == "" → 什么都没发生，按钮自己会按"点击"处理
 
@@ -1078,7 +1112,14 @@ class DockBar(QWidget):
             self._drop_line.hide()
 
     def _update_reorder(self, global_pos: QPoint) -> None:
-        """按光标位置算出目标槽位，并把指示线画到那儿。"""
+        """按光标位置算出目标槽位，把指示线画到那儿，并**让位**。
+
+        需求 2：「长按拖动图标插入到某个位置时，后面的软件会自动后移」。
+
+        做法是"预留空位"：被拖的那个图标留在原位不动，其余图标按
+        「目标槽位」重新排 —— 视觉上就等于别的图标主动向两边让开，
+        松手后拖动的那个正好落进空出来的位置。
+        """
         buttons = self._app_buttons
         if len(buttons) < 2:
             self.hide_drop_line()
@@ -1087,6 +1128,10 @@ class DockBar(QWidget):
         centers = [b.mapToGlobal(QPoint(b.width() // 2, 0)).x() for b in buttons]
         target = min(range(len(buttons)), key=lambda i: abs(cursor_x - centers[i]))
         self._reorder_to = target
+
+        # 先让位（不管指示线画不画，位置都要跟着更新）
+        self._apply_reorder_shift()
+
         if target == self._reorder_from:
             self.hide_drop_line()
             return
@@ -1102,10 +1147,58 @@ class DockBar(QWidget):
         line.raise_()
         line.show()
 
-    def _commit_reorder(self) -> None:
-        """松手：把顺序写回配置并重建。"""
-        self.hide_drop_line()
+    def _apply_reorder_shift(self) -> None:
+        """把"让位"效果真的摆到界面上（纯视觉，不改配置）。
+
+        网格是按行铺的，但图标宽度一致，所以用**横向位移**模拟插入最直观：
+
+        * 被拖的那个：不动（它自己会跟着光标走）；
+        * 夹在「原位置」和「目标位置」之间的那些：整体往反方向挪一格。
+
+        这样松手前就已经能看出"它会插到这里"，而不是只有一根指示线。
+        """
+        buttons = self._app_buttons
         src, dst = self._reorder_from, self._reorder_to
+        if not buttons or src == dst:
+            self._reset_reorder_shift()
+            return
+        step = buttons[0].width() + self.apps_flow._spacing          # noqa: SLF001
+        if dst > src:
+            span = range(src + 1, dst + 1)
+            offset = -step
+        else:
+            span = range(dst, src)
+            offset = step
+        for index, button in enumerate(buttons):
+            if index == src:
+                continue                    # 被拖的自己走
+            button.move(button.x() + (offset if index in span else 0), button.y())
+
+    def _reset_reorder_shift(self) -> None:
+        """把让位造成的位移还原（松手 / 取消时调）。"""
+        try:
+            self.apps_flow.relayout(self._reorder_span_width())
+        except Exception:
+            pass
+
+    def _reorder_span_width(self) -> int:
+        """给 `relayout` 用的可用宽度（和 `_resize_to_content` 里同一套算法）。"""
+        return max(160, self._max_width() - (MIN_MARGIN * 2) - 20
+                   - self._controls_width())
+
+    def _commit_reorder(self) -> None:
+        """松手：把顺序写回配置并重建。
+
+        需求 2 的后半句：「如果拖到桌面就保持原样不进行排序」。
+        所以松手位置**在菜单栏之外**时直接放弃本次排序，顺序一点不动。
+        """
+        inside = self.rect().contains(self.mapFromGlobal(self._release_pos)) \
+            if self._release_pos is not None else True
+        self.hide_drop_line()
+        self._reset_reorder_shift()
+        src, dst = self._reorder_from, self._reorder_to
+        if not inside:
+            return                          # 拖到菜单栏外面 = 用户想取消
         if src == dst:
             return
         if self.cfg.move_to(src, dst):
@@ -1138,7 +1231,9 @@ class DockBar(QWidget):
         if self._mode == "window" and self._press_icon is None:
             self._mode = ""
             self._drag_offset = None
+            # 横竖都记（需求1：自由移动）
             self.cfg.set("dock_x", self.x())
+            self.cfg.set("dock_y", self.y())
             self.reposition()
             event.accept()
             return

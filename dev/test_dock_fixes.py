@@ -135,12 +135,28 @@ def main() -> int:
         app.processEvents()
         time.sleep(0.02)
 
+    # 面板现在只展示**收纳目录里**的内容（需求6 去掉了系统位置），
+    # 而这个用例把 auto_take_on_start 关着，所以要先手动收一次，
+    # 否则面板是空的、"从列表里选一个加为常用"就没得选。
+    taken = nest.take_from_desktop(cfg.desktop)
+    print(f"  [准备] 把测试桌面收进收纳目录：{taken.summary()}")
+    tray.refresh()
+    deadline = time.time() + 25
+    while tray._scan is not None and tray._scan.isRunning() and time.time() < deadline:
+        app.processEvents()
+        time.sleep(0.05)
+    for _ in range(40):
+        app.processEvents()
+        time.sleep(0.02)
+
     print()
     print("── 2. 加点一个常用软件，图标要能认出来 ──")
+    check("面板里有条目可选", len(tray.nest_items) > 0, str(len(tray.nest_items)))
     before = len(cfg.quick_items)
     # 模拟"从列表里选一个加为常用"
     picked = next((i for i in tray.nest_items if i.kind == "shortcut"), None)
-    check("面板里有可作为常用的条目", picked is not None)
+    check("面板里有可作为常用的条目", picked is not None,
+          str([i.kind for i in tray.nest_items][:6]))
     if picked is not None:
         tray.desktop_browser.select_item(picked)
         app.processEvents()

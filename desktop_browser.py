@@ -59,6 +59,8 @@ CELL_H = 110
 DEFAULT_PER_PAGE = 28          # 7 列 × 4 行
 PAGE_SIZE_CHOICES = [14, 21, 28, 35, 42]
 APP_ICON = 34
+# 从网格卡片拖到「常用软件」那一排时携带的 MIME 类型（需求5）
+DND_MIME = "application/x-desktop-nest-item"
 # 贴底时默认给底部菜单栏让开的高度。主程序会用 Dock 的**真实高度**覆盖它
 # （见 `set_bottom_reserve`）——写死一个值的话，菜单栏一变高，面板就会压在它身上。
 DEFAULT_BOTTOM_RESERVE = 84
@@ -113,6 +115,11 @@ class ItemTile(QFrame):
     double_clicked = Signal(object)
     context_requested = Signal(object, object)
 
+    # 长按多久算"我要拖它"（毫秒）。太短会误触发，太长又显得迟钝。
+    HOLD_MS = 350
+    # 长按之后还要移动这么多像素才真的开始拖（防手抖）
+    DRAG_SLOP = 8
+
     def __init__(self, item: "engine.RepoItem", palette: dict,
                  show_extensions: bool = False, parent=None):
         super().__init__(parent)
@@ -124,6 +131,14 @@ class ItemTile(QFrame):
         self.setObjectName("FileTile")
         self.setFixedSize(CELL_W - 8, CELL_H - 8)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        # 长按计时器：到点后允许把手势升级成"拖到常用软件那一排"（需求5）
+        self._press_pos: "QPoint | None" = None
+        self._drag_ready = False
+        self._hold_timer = QTimer(self)
+        self._hold_timer.setSingleShot(True)
+        self._hold_timer.setInterval(self.HOLD_MS)
+        self._hold_timer.timeout.connect(self._begin_drag)
 
         display = engine.display_name(item.name, item.is_dir, show_extensions)
 
@@ -177,15 +192,137 @@ class ItemTile(QFrame):
         if event.button() == Qt.MouseButton.LeftButton:
             self.activated.emit(self.item)
             # 双击打开程序后，高亮由窗口的定时器负责取消（见 select_item）
+            # 记下按下位置：长按之后要拖去"常用软件"那一排（需求5）
+            self._press_pos = event.position().toPoint()
+            self._drag_ready = False
+            self._hold_timer.start()
         elif event.button() == Qt.MouseButton.RightButton:
             self.context_requested.emit(self.item,
                                         self.mapToGlobal(event.position().toPoint()))
         super().mousePressEvent(event)
 
+    # ---- 长按拖到「常用软件」那一排（需求5）--------------------------
+    # 为什么要长按而不是直接拖：卡片单击就是"打开"，直接拖会和它抢手势，
+    # 手一抖就把程序打开了。长按（默认 0.35 秒）之后才算"我要拖它"。
+    def _begin_drag(self) -> None:
+        """长按到点：把手势切成拖拽。"""
+        self._drag_ready = True
+        self.setCursor(Qt.CursorShape.ClosedHandCursor)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if (self._drag_ready and self._press_pos is not None
+                and event.buttons() & Qt.MouseButton.LeftButton):
+            # 位移太小就再等等，免得手抖也触发一次拖拽
+            moved = (event.position().toPoint() - self._press_pos)
+            if moved.manhattanLength() < self.DRAG_SLOP:
+                return
+            try:
+                self._start_drag()
+            finally:
+                self._drag_ready = False
+                self._hold_timer.stop()
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+            return
+        super().mouseMoveEvent(event)
+
+    def _start_drag(self) -> None:
+        """真的发起一次 Qt 拖拽，MIME 里带着条目路径。"""
+        from qt_compat import QDrag, QMimeData
+
+        payload = QMimeData()
+        payload.setData(DND_MIME, str(self.item.path).encode("utf-8"))
+        payload.setText(str(self.item.path))          # 顺带支持拖到别处
+        drag = QDrag(self)
+        drag.setMimeData(payload)
+        pixmap = self.icon_label.pixmap()
+        if pixmap is not None and not pixmap.isNull():
+            drag.setPixmap(pixmap)
+            drag.setHotSpot(pixmap.rect().center())
+        drag.exec(Qt.DropAction.CopyAction)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        self._hold_timer.stop()
+        self._drag_ready = False
+        self._press_pos = None
+        super().mouseReleaseEvent(event)
+
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        self._hold_timer.stop()
+        self._drag_ready = False
         if event.button() == Qt.MouseButton.LeftButton:
             self.double_clicked.emit(self.item)
         super().mouseDoubleClickEvent(event)
+
+
+class QuickDropHost(QWidget):
+    """「常用软件」那一排的容器，同时是**拖拽落点**（需求5）。
+
+    需求：「收纳面板中支持长按拖动软件图标到收纳面板的常用软件栏来添加常用软件，
+    同时菜单栏也要同时显示出新添加的常用软件」。
+
+    单独做成一个控件、而不是给 `DesktopBrowser` 挂 `dragEnterEvent` 之类的
+    方法，是因为拖拽事件只会发给**光标正下方的那个控件**。面板里铺满了几百个
+    卡片，事件根本传不到外层的窗口上；必须让这一排自己声明"我能接收拖放"。
+
+    视觉上：拖着东西悬在上面时，给一条高亮描边，让人知道"松手就加到这里"。
+    """
+
+    dropped = Signal(str)          # 落下的条目路径
+
+    def __init__(self, palette: dict, parent=None):
+        super().__init__(parent)
+        self.p = palette
+        self._active = False
+        self.setAcceptDrops(True)
+
+    # ---- 拖拽进入 / 移动 / 离开 --------------------------------------
+    def _payload_from(self, event) -> str:
+        data = event.mimeData()
+        if data is None or not data.hasFormat(DND_MIME):
+            return ""
+        try:
+            return bytes(data.data(DND_MIME)).decode("utf-8", "replace")
+        except Exception:
+            return ""
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if self._payload_from(event):
+            event.acceptProposedAction()
+            self._set_active(True)
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        if self._payload_from(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802
+        self._set_active(False)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        path = self._payload_from(event)
+        self._set_active(False)
+        if path:
+            event.acceptProposedAction()
+            self.dropped.emit(path)
+        else:
+            event.ignore()
+
+    def _set_active(self, active: bool) -> None:
+        if self._active == active:
+            return
+        self._active = active
+        c = self.p
+        if active:
+            self.setStyleSheet(
+                f"#QuickDropHost {{ border: 1px dashed {c['accent']};"
+                f" border-radius: 10px; background: {c['accent_soft']}; }}")
+        else:
+            self.setStyleSheet("")
+        self.update()
 
 
 class AppButton(QToolButton):
@@ -350,7 +487,10 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         bar.addLayout(title_row)
 
         # 常用启动：图标 + 名称的小快捷方式
-        self.apps_host = QWidget(self.surface)
+        # 这一排同时是"长按拖进来就加为常用"的落点（需求5）
+        self.apps_host = QuickDropHost(self.p, self.surface)
+        self.apps_host.setObjectName("QuickDropHost")
+        self.apps_host.dropped.connect(self._on_quick_dropped)
         self.apps_row = QHBoxLayout(self.apps_host)
         self.apps_row.setContentsMargins(0, 0, 0, 0)
         self.apps_row.setSpacing(4)
@@ -516,6 +656,32 @@ class DesktopBrowser(GlassCardMixin, QWidget):
     def rebuild_apps(self) -> None:
         """公开的"重建常用启动这一排"入口（供主程序信号回调调用）。"""
         self._rebuild_apps()
+
+    # ------------------------------------------------------------------
+    # 需求5：从网格长按拖到「常用软件」那一排 = 加为常用
+    # ------------------------------------------------------------------
+    def _on_quick_dropped(self, raw_path: str) -> None:
+        """把拖进来的条目加为常用启动。
+
+        加完立刻重建这一排、并 `request_quick_changed` 通知主程序 ——
+        主程序会同步**菜单栏**，所以"面板里拖一下就出现在菜单栏上"（需求原话）。
+        """
+        try:
+            path = Path(raw_path)
+        except (TypeError, ValueError):
+            return
+        if not raw_path or not str(path):
+            return
+        if self.cfg.is_quick(path):
+            self.hint.setText("这个条目已经在常用启动了")
+            return
+        name = self._quick_name(path)
+        if not self.cfg.add_quick(path, name):
+            self.hint.setText("加入常用启动失败")
+            return
+        self.rebuild_apps()
+        self.request_quick_changed.emit()
+        self.hint.setText(f"已把「{name}」加入常用启动")
 
     # ------------------------------------------------------------------
     # 图标：统一走"孪生路径 + 自愈缓存"

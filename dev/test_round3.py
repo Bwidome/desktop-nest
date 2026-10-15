@@ -91,6 +91,19 @@ def main() -> int:
     browser = tray.desktop_browser
     dock = tray.dock
 
+    # 面板只展示**收纳目录里**的内容（需求6 去掉了系统位置）。
+    # 本用例 auto_take_on_start 关着，先手动收一次才有"快捷方式"可选。
+    taken = nest.take_from_desktop(cfg.desktop)
+    print(f"  [准备] 把测试桌面收进收纳目录：{taken.summary()}")
+    tray.refresh()
+    deadline = time.time() + 25
+    while tray._scan is not None and tray._scan.isRunning() and time.time() < deadline:
+        app.processEvents()
+        time.sleep(0.05)
+    for _ in range(50):
+        app.processEvents()
+        time.sleep(0.02)
+
     print("── 1. 添加常用软件：图标要能认出来 ──")
     added = 0
     for item in [i for i in tray.nest_items if i.kind == "shortcut"][:4]:
@@ -101,7 +114,9 @@ def main() -> int:
         app.processEvents()
         if len(cfg.quick_items) > before:
             added += 1
-    check("成功加了几个常用软件", added >= 3, str(added))
+    check("成功加了几个常用软件", added >= 3,
+          f"added={added}, 面板条目={len(tray.nest_items)}, "
+          f"快捷方式={len([i for i in tray.nest_items if i.kind == 'shortcut'])}")
 
     # 等图标全部进缓存
     keys = [f"app:{e['path']}" for e in cfg.quick_items]

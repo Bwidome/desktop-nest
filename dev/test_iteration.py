@@ -95,6 +95,20 @@ def main() -> int:
     browser = tray.desktop_browser
     dock = tray.dock
 
+    # 面板只展示**收纳目录里**的内容（需求6 去掉了系统位置）。
+    # 本用例把 auto_take_on_start 关着，所以要手动收一次，
+    # 否则后面"从列表里选一个加为常用 / 批量增删"都没有素材。
+    taken = nest.take_from_desktop(cfg.desktop)
+    print(f"  [准备] 把测试桌面收进收纳目录：{taken.summary()}")
+    tray.refresh()
+    deadline = time.time() + 25
+    while tray._scan is not None and tray._scan.isRunning() and time.time() < deadline:
+        app.processEvents()
+        time.sleep(0.05)
+    for _ in range(50):
+        app.processEvents()
+        time.sleep(0.02)
+
     def pump(seconds: float = 1.2) -> None:
         end = time.time() + seconds
         while time.time() < end:
@@ -184,9 +198,14 @@ def main() -> int:
 
     print()
     print("── BUG1. 崩溃时自动还原桌面（防数据丢失）──")
-    # 把桌面收进收纳目录，制造"收纳完成、还没还原"的窗口期
+    # 制造"收纳完成、还没还原"的窗口期。
+    # 注意：前面 [准备] 阶段可能已经把桌面收进去了，所以这里两种情形都要能走：
+    # 桌面还有东西就收一次；已经空了就直接用现有的收纳内容。
     take = nest.take_from_desktop(cfg.desktop)
-    check("先把桌面收进收纳目录", take.moved >= 5, take.summary())
+    if take.moved == 0:
+        print(f"  （桌面已空，沿用 [准备] 阶段收好的内容：{take.summary()}）")
+    check("收纳目录里已有内容（可进入崩溃还原场景）",
+          nest.nest_has_content(), take.summary())
     desktop_before = len(list(cfg.desktop.iterdir()))
     check("桌面此刻是空的", desktop_before == 0, str(desktop_before))
     nested = len(list(nest.desktop_store().iterdir()))
@@ -230,13 +249,19 @@ def main() -> int:
 
     print()
     print("── BUG2. 常用软件：图标 / 增删同步 / 不留空白 ──")
-    # 重新扫描，让面板有内容
+    # 崩溃兜底那一段已经把东西还原回桌面了，面板此刻是空的。
+    # 面板只展示收纳目录里的内容（需求6），所以要**再收一次**才有素材 ——
+    # 这也正是真实启动流程：auto_take 之后面板就有东西了。
+    again = nest.take_from_desktop(cfg.desktop)
+    print(f"  [准备] 重新收纳：{again.summary()}")
     tray.refresh()
     deadline = time.time() + 25
     while tray._scan is not None and tray._scan.isRunning() and time.time() < deadline:
         app.processEvents()
         time.sleep(0.05)
     pump(1)
+    check("面板里重新有素材可供批量增删", len(browser._items) >= 5,
+          str(len(browser._items)))
 
     while cfg.quick_items:
         cfg.remove_quick(cfg.quick_items[0]["path"])

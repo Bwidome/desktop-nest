@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 桌面收纳（nest）自检
@@ -165,6 +165,8 @@ def main() -> int:
 
     print()
     print("── 3. 系统位置快捷方式（此电脑 / 回收站）──")
+    # 需求6 之后，这些不再出现在面板里；但 `links/` 与映射表仍然要维护 ——
+    # "退出还原"要靠 `shell_path_map()` 把它们排除掉，不能当普通内容搬回桌面。
     links = nest.sync_system_links()
     names = [entry.name for entry in links]
     check("创建了「此电脑」", "此电脑" in names, str(names))
@@ -180,12 +182,14 @@ def main() -> int:
           nest.shell_path_for(nest.links_store() / "回收站.lnk").startswith("::"))
 
     print()
-    print("── 4. 面板内容 = 收纳内容 + 系统位置 ──")
+    print("── 4. 面板内容 = 只有收纳内容（需求6：不含系统位置）──")
     items = nest.list_nest_items()
-    check("条目数 = 38 + 4 个系统位置", len(items) == 42, str(len(items)))
+    check("条目数 = 收纳的 38 项", len(items) == 38, str(len(items)))
     item_names = [i.name for i in items]
-    check("包含「此电脑」", "此电脑" in item_names)
-    check("包含「回收站」", "回收站" in item_names)
+    check("不含「此电脑」", "此电脑" not in item_names)
+    check("不含「回收站」", "回收站" not in item_names)
+    check("不含「网络」", "网络" not in item_names)
+    check("不含「用户文件夹」", "用户文件夹" not in item_names)
     check("包含收纳的文件夹", "资料夹A" in item_names)
     check("包含那个快捷方式", "记事本.lnk" in item_names)
     folders = [i for i in items if i.is_dir]
@@ -228,7 +232,8 @@ def main() -> int:
 
     browser.goto_page(1)
     app.processEvents()
-    check("第二页剩余 14 个", len(browser._tiles) == 14, str(len(browser._tiles)))
+    # 38 项、每页 28 → 第二页剩 10 个（需求6 去掉了 4 个系统位置）
+    check("第二页剩余 10 个", len(browser._tiles) == 10, str(len(browser._tiles)))
     check("末页禁用下一页", not browser.btn_next.isEnabled())
     browser.goto_page(999)
     check("越界夹到末页", browser.page_label.text() == "2 / 2")
@@ -260,7 +265,7 @@ def main() -> int:
     check("无结果显示空提示", browser.empty_label.isVisible())
     browser.clear_search()
     app.processEvents()
-    check("清空搜索恢复 42 项", len(browser._matches) == 42, str(len(browser._matches)))
+    check("清空搜索恢复 38 项", len(browser._matches) == 38, str(len(browser._matches)))
 
     print()
     print("── 6. Dock：第一个控件 + 主行（分页行已移除）──")

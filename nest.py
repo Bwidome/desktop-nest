@@ -34,23 +34,84 @@ Progress = "Callable[[int, int, str], None]"
 
 NEST_DIR_NAME = ".desktop-nest"
 
+# 记忆：`nest_root()` 会被频繁调用（每个条目取图标都要问一次），
+# 而候选判定要 stat 好几次。同一个进程里目录不会变，缓存住。
+# 缓存键是"当前 nest_root 函数对象的 id"——函数被替换过（测试指到沙盒）
+# 就自动不命中，不需要调用方记得清缓存。
+_NEST_ROOT_CACHE: "Path | None" = None
+_NEST_ROOT_CACHE_KEY: "int | None" = None
+
 
 # --------------------------------------------------------------------------
 # 目录位置
 # --------------------------------------------------------------------------
 def nest_root() -> Path:
-    """收纳根目录（优先用户目录，不可写时退到程序目录）。"""
-    candidates = []
+    """收纳根目录。
+
+    **优先级：已有内容的目录 > 新位置。**
+
+    为什么这条顺序很关键（"退出重开后菜单栏图标不显示"的根因）：
+    早先这里只按"能不能写"挑，第一个能写的就用。于是当程序从**项目目录**启动、
+    而用户上一次用的是 `~/.desktop-nest` 时，会在项目里**另建一个空的**
+    `.desktop-nest` 并采用它 —— 配置里的常用软件仍然记着
+    `C:\\Users\\<你>\\.desktop-nest\\desktop\\xxx.lnk`，而 `desktop_store()`
+    指向了项目里那个空目录，`twin_path()` 自然一个都对不上，
+    所有常用软件的图标就全部取不到（菜单栏上一排占位块）。
+
+    现在的规则：
+    1. 谁已经有 `desktop/` 内容就用谁（不新建、不抢）；
+    2. 都没有时，优先用户目录（可写就用）；
+    3. 用户目录写不了才退到程序目录。
+    """
+    global _NEST_ROOT_CACHE, _NEST_ROOT_CACHE_KEY
+    # 缓存键带上"当前这个函数对象"。`nest_root` 被替换过（测试里指到沙盒）
+    # 就不会命中缓存 —— 否则换了个实现还返回老结果，测试会看到空目录。
+    key = id(nest_root)
+    if _NEST_ROOT_CACHE is not None and _NEST_ROOT_CACHE_KEY == key:
+        return _NEST_ROOT_CACHE
+
+    candidates: "list[Path]" = []
     try:
         candidates.append(Path.home() / NEST_DIR_NAME)
     except RuntimeError:
         pass
     candidates.append(config.default_project_dir() / NEST_DIR_NAME)
+
+    _NEST_ROOT_CACHE = _pick_nest_root(candidates)
+    _NEST_ROOT_CACHE_KEY = key
+    return _NEST_ROOT_CACHE
+
+
+def _dir_has_content(folder: Path) -> bool:
+    """这个目录里是不是已经有东西了（用来判断"这是用户正在用的那个 nest"）。"""
+    try:
+        if not folder.is_dir():
+            return False
+        desktop_dir = folder / "desktop"
+        if desktop_dir.is_dir() and any(desktop_dir.iterdir()):
+            return True
+        # desktop 空但根目录里已经有清单文件，也算"正在用"
+        return any(folder.iterdir())
+    except OSError:
+        return False
+
+
+def _pick_nest_root(candidates: "list[Path]") -> Path:
+    """按"已有内容 > 能写 > 兜底"挑一个收纳根目录。"""
+    for candidate in candidates:
+        if _dir_has_content(candidate):
+            return candidate
     for candidate in candidates:
         ok, _reason = _writable(candidate)
         if ok:
             return candidate
     return candidates[-1]
+
+
+def forget_nest_root() -> None:
+    """丢掉目录缓存（测试里把 nest_root 换成沙盒路径后要调它）。"""
+    global _NEST_ROOT_CACHE
+    _NEST_ROOT_CACHE = None
 
 
 def _writable(folder: Path) -> "tuple[bool, str]":
@@ -327,7 +388,16 @@ def list_desktop(desktop: Path, *, include_public: bool = True
 
 
 def list_nest_items() -> "list":
-    """列出分页里要显示的全部条目：收纳内容 + 系统位置快捷方式。"""
+    """列出收纳面板里要显示的全部条目：**只有收纳内容**。
+
+    需求：「移除收纳面板的此电脑、回收站、网络、用户文件夹」。
+    所以这里不再把系统位置的快捷方式拼进来 —— 面板只展示真正被收进来的
+    文件 / 文件夹 / 快捷方式。
+
+    `links_store()` 与 `links.json` 仍然照常维护（见 `sync_system_links`）：
+    它们还被"退出还原时别把系统项也当内容搬走"用到
+    （`shell_path_map()` 会把这类条目排除掉），只是不再出现在界面上。
+    """
     import engine
 
     items: "list" = []
@@ -354,15 +424,6 @@ def list_nest_items() -> "list":
                     sources.get(entry.name, "")))
             except OSError:
                 continue
-
-    # 系统位置排在前面，和桌面上的观感一致
-    for name, shell_path, _icon in [(e.name, e.shell_path, e.icon_source)
-                                    for e in default_system_links()]:
-        link = links_store() / f"{name}.lnk"
-        if not link.exists():
-            continue
-        items.append(engine.RepoItem(link, name, False, "shortcut",
-                                     0, safety.safe_mtime(link), name))
     return items
 
 

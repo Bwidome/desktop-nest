@@ -408,17 +408,25 @@ def cache_dir() -> Path:
     return folder
 
 
+# 缓存格式版本。**用途变了就要 +1**，否则升级后拿到的还是旧算法产出的图，
+# 看着像改动没生效。历史：
+#   v3：高清档改成"Shell jumbo 与 exe 资源段抽图二选一"
+#   v4：裁剪余量从"3% + 保底 1px"提到"6% + 保底 4px"，
+#       修"有些软件图标会少几个边角"
+CACHE_VERSION = "v4"
+
+
 def icon_key(path: Path, size: int) -> str:
-    """缓存键：路径 + 修改时间 + 大小，文件换了图标会自动失效。"""
+    """缓存键：路径 + 修改时间 + 大小 + 尺寸 + 算法版本。
+
+    文件换了图标（或我们的取图算法变了）都会自动失效。
+    """
     try:
         stat = path.stat()
         stamp = f"{int(stat.st_mtime)}-{stat.st_size}"
     except OSError:
         stamp = "missing"
-    # 版本号 v3：高清档改成"Shell jumbo 与 exe 资源段抽图二选一"，
-    # 旧缓存里存的还是那张"256 画布 + 左上角贴 48 小图"的糊图。
-    # 不换版本号的话升级后拿到的还是老图，看着像没生效。
-    raw = f"{os.path.normcase(str(path))}|{stamp}|{size}|v3"
+    raw = f"{os.path.normcase(str(path))}|{stamp}|{size}|{CACHE_VERSION}"
     return hashlib.sha1(raw.encode("utf-8", "surrogatepass")).hexdigest()[:20]
 
 
@@ -526,21 +534,29 @@ def crop_raw(raw: "RawIcon", box) -> "RawIcon":
     return RawIcon(width, height, b"".join(rows), raw.key)
 
 
-# 裁剪时四周留出的呼吸空间（按原图边长算，再保底 1px）。
-# 为什么不能"贴着内容裁"：`content_box` 的判据是 alpha > 8，而很多图标
-# 边缘是一圈很淡的投影 / 抗锯齿过渡，alpha 恰好落在 1~8 之间。
-# 严丝合缝地裁下去，那圈过渡就被切掉了，图标看着像被削掉一块
-# （用户说的"图标显示会有不完全"）。留一点点边就不切了。
-CROP_PAD_RATIO = 0.03
+# 裁剪时四周留出的呼吸空间（按原图边长算，再保底若干像素）。
+#
+# 为什么不能"贴着内容裁"（用户报的"有些软件图标会少几个边角"）：
+# `content_box` 的判据是 alpha > 8，而图标边缘往往是一圈很淡的
+# 抗锯齿 / 投影过渡，alpha 恰好落在 1~8 之间。严丝合缝地裁下去，
+# 那圈过渡就被切掉了 —— 圆角、外发光、异形轮廓（比如盾牌、六边形）
+# 的边缘会像被刀削掉一块。
+#
+# 早先这里只有 3% + 保底 1px。实测对小图（jumbo 裁完只剩 40~48px 的那种）
+# 不够：1px 的余量在缩放后几乎等于没留，边角还是会被削掉。
+# 现在按边长给 6% 并保底 4px —— 宁可多留一点透明，也不能切到图形本身。
+CROP_PAD_RATIO = 0.06
+CROP_PAD_MIN = 4
 
 
 def trim_raw(raw: "RawIcon", threshold: int = 8) -> "RawIcon":
-    """裁掉透明边距，并**在四周留一点点余量**。拿不到外接框就原样返回。"""
+    """裁掉透明边距，并**在四周留一点余量**。拿不到外接框就原样返回。"""
     box = content_box(raw, threshold)
     if box is None:
         return raw
     left, top, right, bottom = box
-    pad = max(1, int(round(max(raw.width, raw.height) * CROP_PAD_RATIO)))
+    pad = max(CROP_PAD_MIN,
+              int(round(max(raw.width, raw.height) * CROP_PAD_RATIO)))
     left = max(0, left - pad)
     top = max(0, top - pad)
     right = min(raw.width, right + pad)
