@@ -198,20 +198,17 @@ def main() -> int:
     check("分页相关方法也删掉了",
           not hasattr(dock, "toggle_strip") and not hasattr(dock, "rebuild_strip")
           and not hasattr(dock, "strip_pages"))
-    check("主行控件齐全：桌面整理 / ＋ / ⚙ / ✕",
-          hasattr(dock, "desktop_btn") and hasattr(dock, "add_btn")
-          and hasattr(dock, "settings_btn") and hasattr(dock, "btn_hide_dock"))
+    check("菜单栏只留「桌面整理」入口 + 常用软件",
+          hasattr(dock, "desktop_btn") and dock._control_buttons == [])
+    check("＋ / － / ⚙ / ✕ 四个控制按钮已全部删除",
+          not any(hasattr(dock, name) for name in
+                  ("add_btn", "del_btn", "settings_btn", "btn_hide_dock")),
+          str([a for a in ("add_btn", "del_btn", "settings_btn",
+                           "btn_hide_dock") if hasattr(dock, a)]))
     check("窗口尺寸贴近内容（不留空白）",
           abs(dock.height() - dock.sizeHint().height()) <= 24,
           f"height={dock.height()} sizeHint={dock.sizeHint().height()}")
-    # 底板改成纯透明之后，菜单栏必须**只有一行**——分两行会变成上下两撮图标
-    # 各自浮着，很难看。这里比垂直中心：图标区和 ＋ 按钮要在同一条水平线上。
-    flow_mid = dock.apps_flow.geometry().center().y()
-    add_mid = dock.add_btn.geometry().center().y()
-    check("菜单栏只有一行（＋ 与图标同一水平线）",
-          abs(flow_mid - add_mid) <= 4,
-          f"图标中线 {flow_mid} vs ＋ 中线 {add_mid}")
-    check("收纳内容仍保留为「＋ 添加」的候选",
+    check("收纳内容仍保留为添加常用软件的候选",
           len(dock._items) == len(tray.nest_items),
           f"{len(dock._items)} vs {len(tray.nest_items)}")
     check("配置里也不再有分页行开关",
@@ -501,23 +498,36 @@ def main() -> int:
         return dock.x()
 
     print()
-    print("── 11. 还没加常用软件时，「＋」左边不该有空隙 ──")
+    print("── 11. 还没加常用软件时，菜单栏上不该多出任何东西 ──")
     # 先清空常用项，回到"刚装好、一个都没加"的状态
     while cfg.quick_items:
         cfg.remove_quick(cfg.quick_items[0]["path"])
     rebuild_dock()
     check("应用区只剩「桌面整理」一项（没有多余的分隔线）",
           dock.apps_flow.item_count() == 1, str(dock.apps_flow.item_count()))
+    # 需求："主菜单栏就保留第一个控件和常用软件"。
+    # 主行里应当只有两样东西：应用区本身 + 一个弹性占位项（把图标顶到左边）。
+    # 以前 ＋ / － / ⚙ / ✕ 四个按钮也在这行里，所以这里逐个点名字断言它们不在。
+    row_kinds = []
+    for index in range(dock.main_row.count()):
+        entry = dock.main_row.itemAt(index)
+        if entry is None:
+            continue
+        if entry.widget() is dock.apps_flow:
+            row_kinds.append("apps")
+        elif entry.spacerItem() is not None:
+            row_kinds.append("stretch")
+        else:
+            row_kinds.append(type(entry.widget()).__name__)
+    check(f"主行里只有应用区 + 一个弹性占位项（{row_kinds}）",
+          row_kinds == ["apps", "stretch"], str(row_kinds))
     desktop_pos = dock.desktop_btn.mapTo(dock, QPoint(0, 0))
-    add_pos = dock.add_btn.mapTo(dock, QPoint(0, 0))
-    gap = add_pos.x() - (desktop_pos.x() + dock.desktop_btn.width())
-    # 改之前这里 ≈17px：1px 分隔线 + 左右各 5px margin + 两侧 3px 间距。
-    # 现在只剩布局自身的一个间距（3px），最多放宽到 8px。
-    check(f"「＋」左边只剩一个间距（{gap}px，原来 ≈17px）", 0 <= gap <= 8,
-          f"{gap}px | 桌面整理 x={desktop_pos.x()} w={dock.desktop_btn.width()} | "
-          f"＋ x={add_pos.x()} w={dock.add_btn.width()} | "
-          f"窗口 w={dock.width()} | apps_flow w={dock.apps_flow.width()} "
-          f"items={dock.apps_flow.item_count()} cols={dock.apps_flow._columns}")
+    right_edge = desktop_pos.x() + dock.desktop_btn.width()
+    # 空栏时，入口右边到窗口可用区右边界之间不该夹着别的控件
+    check("空栏时入口右边没有别的控件",
+          dock.apps_flow.item_count() == 1 and dock._control_buttons == [],
+          f"items={dock.apps_flow.item_count()} "
+          f"controls={len(dock._control_buttons)} 入口右边界={right_edge}")
 
     # 加了常用项之后**依然没有分隔线**：应用区里只有「桌面整理」+ 常用项。
     # 根因是应用区按**等宽网格**排（`unit_size()` 取所有条目里最大的那个），
@@ -701,12 +711,18 @@ def main() -> int:
     check("get_icon_best() 对 .lnk 能取到高清原图（最长边 ≥192）",
           best is not None and max(best.width, best.height) >= 192,
           f"{best.width}x{best.height}" if best else "None")
-    # 高清档必须**裁掉透明边距**：内容占满整张图，缩到显示尺寸才不会"看着小"
+    # 高清档必须**裁掉透明边距**：内容占满整张图，缩到显示尺寸才不会"看着小"。
+    # 但也不能"贴着内容裁"——边缘那圈 alpha 1~8 的淡投影会被切掉、图标像缺了一块，
+    # 所以 `trim_raw()` 会留 3% 的余量，这里放宽到"覆盖 90% 以上"。
     if best is not None:
         box = icons_mod.content_box(best)
-        check("高清档已经裁掉透明边距（内容占满画布）",
-              box is None or box == (0, 0, best.width, best.height),
-              f"box={box} size={best.width}x{best.height}")
+        if box is None:
+            covered = 1.0
+        else:
+            covered = min((box[2] - box[0]) / best.width,
+                          (box[3] - box[1]) / best.height)
+        check(f"高清档已经裁掉透明边距（内容覆盖 {covered:.0%}）",
+              covered >= 0.90, f"box={box} size={best.width}x{best.height}")
     # 老路径只有 32×32 —— 这正是"图标清晰度太低"的根因，钉住它别再退回去
     plain_icon = icons_mod.get_icon(link, 44)
     check("旧路径（SHGetFileInfoW）确实只有 32×32（所以必须走 jumbo）",
@@ -717,9 +733,14 @@ def main() -> int:
 
     loader = IconLoader(per_tick=0)          # 不真去取，只看排队记录
     loader.request("probe", link, None, 44, "x", hi_res=True)
+    # 队列项：(key, path, hint, size, fallback, hi_res, stamp)
     check("菜单栏的取图请求带上了高清标记",
-          bool(loader._queue) and loader._queue[0][-1] is True,
-          str(loader._queue[0][-1] if loader._queue else None))
+          bool(loader._queue) and loader._queue[0][5] is True,
+          str(loader._queue[0][5] if loader._queue else None))
+    check("队列项末尾带的是「文件指纹」（缓存靠它判断要不要重取）",
+          bool(loader._queue) and isinstance(loader._queue[0][6], str)
+          and loader._queue[0][6] == loader._stamp(link, 44),
+          str(loader._queue[0][6] if loader._queue else None))
     loader._timer.stop()
     loader.deleteLater()
 
@@ -758,8 +779,8 @@ def main() -> int:
     queued = list(browser.loader._queue)
     check("收纳面板重新取图时确实排了活", len(queued) > 0, str(len(queued)))
     check("收纳面板的取图请求**全部**带高清标记（网格 + 常用启动行）",
-          bool(queued) and all(item[-1] is True for item in queued),
-          f"hi_res 标记集合：{sorted({item[-1] for item in queued})}")
+          bool(queued) and all(item[5] is True for item in queued),
+          f"hi_res 标记集合：{sorted({item[5] for item in queued})}")
     # 网格图标要显示 48px、常用启动行 34px，都超过旧路径的 32×32 上限，
     # 所以两处都必须走 get_icon_best()，钉住别再退回 32px 档。
     check("收纳面板请求的尺寸确实超过旧路径上限（>32）",

@@ -74,6 +74,54 @@ def links_store() -> Path:
     return nest_root() / "links"
 
 
+def twin_path(path: "Path | str", desktop: "Path | str") -> "Path | None":
+    """同一个条目在**收纳目录 / 桌面**上的另一半，存在才返回。
+
+    为什么需要它：常用启动里存的是"当前那个位置"的路径。程序刚启动时，
+    配置里记的还可能是收纳目录里的路径（上次运行时收进去的），可那一刻
+    东西还好好躺在桌面上——路径不存在，取图标就会失败（Shell 对不存在的
+    路径会回一张白纸图标）。反过来，程序把桌面收进来之后，桌面上的那份
+    又没了。
+
+    取图标这种"只读"的场合，用孪生路径当来源最稳：两边哪个在就用哪个，
+    用户看到的永远是真实的程序图标。
+    """
+    try:
+        path = Path(path)
+    except (TypeError, ValueError):
+        return None
+    try:
+        desktop = Path(desktop)
+    except (TypeError, ValueError):
+        return None
+    store = desktop_store()
+    for origin, other in ((store, desktop), (desktop, store)):
+        try:
+            relative = path.relative_to(origin)
+        except ValueError:
+            continue
+        if not relative.parts:
+            continue
+        twin = other / relative
+        return twin if twin.exists() else None
+    return None
+
+
+def icon_source(path: "Path | str", desktop: "Path | str") -> "Path | None":
+    """取图标时该读哪个文件：优先本体，本体不在就退回它的孪生路径。
+
+    都不在就返回 None —— 调用方据此**不去请求图标**，界面上留占位块，
+    等文件真的到位（下一次重建）再取。这条是"白纸图标"的兜底闸门。
+    """
+    try:
+        path = Path(path)
+    except (TypeError, ValueError):
+        return None
+    if path.exists():
+        return path
+    return twin_path(path, desktop)
+
+
 def links_manifest() -> Path:
     return nest_root() / "links.json"
 

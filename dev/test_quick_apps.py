@@ -162,7 +162,10 @@ def main() -> int:
     browser._rebuild_apps()
     pump(0.6)
     check("删空后按钮数 0", len(app_buttons()) == 0, str(len(app_buttons())))
-    check("删空后仍有「＋添加」按钮", browser.btn_add_app is not None)
+    # 需求：增删两个控件合并成一个「管理」控件，所以这里盯的是它
+    check("删空后仍有「管理」控件", browser.btn_manage is not None)
+    check("删空后管理控件没被禁用（还能进去加回来）",
+          browser.btn_manage.isEnabled())
 
     print()
     print("── 6. 数据持久化：重新读配置应当还在 ──")

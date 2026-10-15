@@ -5,15 +5,17 @@
 ==================
 贴屏幕底部正中一条仿 macOS 的常驻悬浮栏：
 
-    ┌────────────────────────────────────────────────────────────┐
-    │ [▣ 桌面整理] │ [微][S][E]…（常用启动，图标+名称）  ＋  ⚙  ✕ │
-    └────────────────────────────────────────────────────────────┘
+    ┌──────────────────────────────────────────────────┐
+    │ [▣ 桌面整理]  [微][S][E]…（常用启动，图标 + 名称） │
+    └──────────────────────────────────────────────────┘
 
 * **第一个控件就是"桌面整理"**，点它打开完整的收纳面板（分页 + 搜索）；
   再点一次收起。分页浏览收纳内容**全部在收纳面板里完成**，
   菜单栏本身不再放那排分页条目（那一行已经删掉）。
-* 中间是常用启动项，同样是图标 + 名称
-* 右边依次是 ＋ 添加、－ 移除、⚙ 设置、✕ 隐藏整条菜单栏
+* 后面全是常用启动项，图标 + 名称
+* **没有别的控件了**——需求："主菜单栏就保留第一个控件和常用软件"。
+  ＋ / － / ⚙ / ✕ 四个按钮已删除，那四件事分别挪到：
+  收纳面板的「管理」控件（加/减常用软件）、图标右键菜单、托盘菜单。
 * **全部挤在同一行**：底板已经透明，分两行会显得很散
 * 空白处右键出菜单栏设置
 
@@ -25,12 +27,12 @@
     · 右键                  → 菜单栏设置
 
 外观：**纯透明的浮层**——没有底板，只有「桌面整理」控件和常用软件的图标
-（外加 ＋ / － / ⚙ / ✕ 四个小按钮）浮在桌面上，见 theme 里的 `#DockSurface`。
+浮在桌面上，见 theme 里的 `#DockSurface`。
 
-图标清晰度：常用软件走 `icons.get_icon_best()`，拿的是系统图像列表里
-**256×256** 的原图，再让 Qt 平滑缩到显示尺寸——原来只拿得到 32×32，
-拉到 44/52 显示就是放大糊图。「桌面整理」那个矢量图标同理，预先画好
-16~256 各档供 Qt 挑。
+图标清晰度：常用软件走 `icons.get_icon_best()`，两条高清来源都试
+（Shell 的 256×256 jumbo / 直接从 exe 资源段按 256 抽），再让 Qt 平滑缩到
+显示尺寸——原来只拿得到 32×32，拉到 44/52 显示就是放大糊图。
+「桌面整理」那个矢量图标同理，预先画好 16~256 各档供 Qt 挑。
 """
 
 from __future__ import annotations
@@ -45,6 +47,7 @@ from qt_compat import (
 )
 
 import engine
+import nest
 import safety
 import theme as theme_mod
 from widgets import (IconLoader, PLACEHOLDER_COLORS, app_icon, clear_hover,
@@ -542,14 +545,17 @@ class DockBar(QWidget):
         for entry in self.cfg.quick_items:
             path = Path(entry["path"])
             name = entry["name"] or path.name
-            exists = safety.safe_exists(path)
+            # "还在不在"要看本体 + 孪生路径：常用软件记的是上次它在的位置，
+            # 桌面上那份和收纳目录里那份，只要有一份在就算有效。
+            source = nest.icon_source(path, self.cfg.desktop)
+            exists = source is not None
             button = self._make_button(
                 icon_size=self._icon_size,
                 tooltip=f"{name}\n{path}"
                         + ("" if exists else "\n（已失效）")
                         + "\n（按住可拖动排序）",
                 fallback_text=name,
-                fallback_kind=engine.kind_of(path) if exists else "other",
+                fallback_kind=engine.kind_of(source or path) if exists else "other",
                 on_click=lambda _btn, p=path: self._launch(p),
                 payload=path,
                 show_text=True,
@@ -599,51 +605,17 @@ class DockBar(QWidget):
         # （之前"加完常用项菜单栏跑出屏幕"就是这个顺序问题）。
         self._build_apps()
 
-        self.add_btn = QToolButton(self.surface)
-        self.add_btn.setObjectName("DockAdd")
-        self.add_btn.setText("＋")
-        self.add_btn.setToolTip("把程序或文件加到菜单栏（可多选批量添加）")
-        self.add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.add_btn.setFixedSize(self._icon_size - 6, self._icon_size - 4)
-        self._wire_control(self.add_btn, self._show_add_menu)
-        self._add_control(self.add_btn)
-
-        # ---- 删除按钮：紧挨在「＋」右边，批量移除常用启动 ----
-        self.del_btn = QToolButton(self.surface)
-        self.del_btn.setObjectName("DockDel")
-        self.del_btn.setText("－")
-        self.del_btn.setToolTip("从菜单栏批量移除常用启动（可多选）")
-        self.del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.del_btn.setFixedSize(self._icon_size - 6, self._icon_size - 4)
-        self._wire_control(self.del_btn, self.remove_quick_dialog)
-        # 没有常用项时禁用，避免点了弹空窗
-        self.del_btn.setEnabled(bool(self.cfg.quick_items))
-        self._add_control(self.del_btn)
-
-        self.settings_btn = QToolButton(self.surface)
-        self.settings_btn.setObjectName("DockNav")
-        self.settings_btn.setText("⚙")
-        self.settings_btn.setToolTip("设置")
-        self.settings_btn.setFixedSize(self._icon_size - 10, self._icon_size - 6)
-        self._wire_control(self.settings_btn,
-                           lambda: self.open_settings.emit())
-        self._add_control(self.settings_btn)
-
-        # ---- 隐藏整条菜单栏 ----
-        self.btn_hide_dock = QToolButton(self.surface)
-        self.btn_hide_dock.setObjectName("DockNav")
-        self.btn_hide_dock.setText("✕")
-        self.btn_hide_dock.setToolTip(
-            "隐藏整条菜单栏\n（之后可从托盘菜单「显示底部菜单栏」重新打开）")
-        self.btn_hide_dock.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_hide_dock.setFixedSize(self._icon_size - 10, self._icon_size - 6)
-        self._wire_control(self.btn_hide_dock, self.hide_self)
-        self._add_control(self.btn_hide_dock)
-
+        # ---- 不再有任何控制按钮 ----
+        # 需求：「主菜单栏就保留第一个控件和常用软件，其他的控件加号减号齿轮×删除」。
+        # 所以 ＋ / － / ⚙ / ✕ 四个按钮全部去掉，菜单栏上只剩
+        # 「桌面整理」入口 + 常用软件图标。
+        #
+        # 原来那四件事现在都在别处：
+        #   ＋ 加常用 → 收纳面板的「管理」控件（卡片右上角的加号）/ 图标右键菜单
+        #   － 删常用 → 收纳面板的「管理」控件（左上角减号）/ 图标右键菜单
+        #   ⚙ 设置   → 托盘菜单「设置」
+        #   ✕ 隐藏   → 托盘菜单「显示底部菜单栏」开关
         self.main_row.addStretch(1)
-        # 重建后重新判断「删除」是否可用（删空之后要变灰，否则点了弹空窗）
-        if hasattr(self, "del_btn"):
-            self.del_btn.setEnabled(bool(self.cfg.quick_items))
         self._queue_icons()
         self.refit()
 
@@ -744,13 +716,17 @@ class DockBar(QWidget):
     def _queue_icons(self) -> None:
         for entry in self.cfg.quick_items:
             path = Path(entry["path"])
-            if not safety.safe_exists(path):
-                continue
-            hint = (engine.resolve_shortcut_target(path)
-                    if path.suffix.lower() == ".lnk" else None)
+            # 本体不在就用孪生路径（桌面 ↔ 收纳目录）。常用软件记的是
+            # "上次它在的位置"，程序刚启动、东西还没收进来时那个路径不存在，
+            # 直接去取 Shell 会回一张"未知文件类型"的白纸图标。
+            source = nest.icon_source(path, self.cfg.desktop)
+            if source is None:
+                continue                 # 两边都没有：留着占位块，下次重建再取
+            hint = (engine.resolve_shortcut_target(source)
+                    if source.suffix.lower() == ".lnk" else None)
             # hi_res=True：菜单栏图标要放大显示，必须拿 256×256 的原图再缩，
             # 否则就是把 32×32 硬拉大（"图标清晰度太低"的根因）。
-            self.loader.request(str(path), path, hint, self._icon_size,
+            self.loader.request(str(path), source, hint, self._icon_size,
                                 entry["name"] or path.name, hi_res=True)
 
     def _on_icon_ready(self, key: str, icon) -> None:
@@ -776,7 +752,11 @@ class DockBar(QWidget):
         # 启动之后鼠标还停在图标上，先把高光清掉——
         # 不然那条 `:hover` 底色会一直亮着（用户说的"一直保持高亮"）。
         self.clear_hover()
-        ok, reason = engine.launch(path)
+        # 本体不在就启动孪生路径那一份：常用软件记的是上次运行时的位置，
+        # 而桌面/收纳目录之间的搬动是程序自己的正常行为，不该让它失效。
+        target = path if safety.safe_exists(path) else (
+            nest.twin_path(path, self.cfg.desktop) or path)
+        ok, reason = engine.launch(target)
         if not ok:
             self.setToolTip(f"{path.name}：{reason}")
             QTimer.singleShot(4000, lambda: self.setToolTip(""))
@@ -830,7 +810,8 @@ class DockBar(QWidget):
         menu = QMenu(self)
         action_from_list = menu.addAction("从收纳内容里选…（可多选）")
         action_file = menu.addAction("浏览文件…")
-        chosen = popup_menu(menu, self.add_btn.mapToGlobal(QPoint(0, -6)))
+        # 菜单栏上已经没有「＋」按钮了，菜单就弹在菜单栏自己的正中间上方
+        chosen = popup_menu(menu, self.mapToGlobal(QPoint(self.width() // 2, 0)))
         if chosen is None:
             return
         if chosen is action_from_list:
@@ -1168,6 +1149,10 @@ class DockBar(QWidget):
         action_files = menu.addAction("打开桌面收纳面板")
         action_restore_all = menu.addAction("全部还原到桌面")
         menu.addSeparator()
+        # 菜单栏上原来的「＋」按钮已经删掉了，但"加常用软件"这件事还得有个入口：
+        # 面板里挑不到的程序（不在收纳目录里），就从这里直接选文件。
+        action_add_quick = menu.addAction("添加常用软件…")
+        menu.addSeparator()
 
         size_menu = menu.addMenu("图标大小")
         for size in DOCK_ICON_SIZES:
@@ -1195,6 +1180,8 @@ class DockBar(QWidget):
             self.open_desktop_files.emit()
         elif chosen is action_restore_all:
             self.request_refresh.emit()
+        elif chosen is action_add_quick:
+            self._show_add_menu()
         elif chosen is action_panel:
             self.open_panel.emit()
         elif chosen is action_settings:

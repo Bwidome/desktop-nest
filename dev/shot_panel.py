@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-给四张界面拍宣传图
+给五张界面拍宣传图
 =================
 * `shots/panel-main.png`    —— 主面板（悬浮磨砂玻璃卡片）
-* `shots/dock.png`          —— 底部菜单栏（只有主行，没有分页行）
+* `shots/dock.png`          —— 底部菜单栏（只剩「桌面整理」入口 + 常用软件）
 * `shots/dock-reorder.png`  —— 长按拖动排序时的插入指示线
 * `shots/popup-glass.png`   —— 收纳面板（Dock 第一个控件点开的上拉磨砂浮层）+ 底部菜单栏
+* `shots/popup-manage.png`  —— 收纳面板的**管理模式**：唯一的「管理」控件点亮后，
+                               常用软件卡片左上角长「－」、其余卡片右上角长「＋」
 
 磨砂玻璃是 **DWM 在合成阶段做的**，Qt 自己 `grab()` 出来的图里没有模糊，
 所以必须：摆一块高对比背景板 → 真把窗口显示出来 → **截整屏** → 裁掉多余部分。
@@ -41,10 +43,21 @@ MARGIN_SMALL = 12
 BOTTOM_MARGIN = 8
 
 
+def force_top(widget: QWidget) -> None:
+    """把演示窗口抬到最上层（**仅截图脚本用**）。
+
+    本机可能同时开着全屏游戏之类的窗口，普通 Tool 窗口会被整个压在下面，
+    截屏就只能截到游戏画面。截图时临时加一个 StaysOnTop 最省事；
+    生产代码里绝对不加——收纳面板/菜单栏是故意要让到别的程序后面的。
+    """
+    widget.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+
+
 def build_backdrop() -> QWidget:
     """一块柔和的彩色背景板，用来衬托磨砂。"""
     win = QWidget()
-    win.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
+    win.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+                       | Qt.WindowType.WindowStaysOnTopHint)
     win.resize(BACK_W, BACK_H)
     win.move(60, 20)
 
@@ -108,18 +121,6 @@ def main() -> int:
     # 传成 `.../config.json` 的话它会当成目录再拼一层，配置就永远写不出去。
     cfg = config_mod.Config(str(base))
 
-    # 菜单栏上摆几个常用启动，好让"纯透明底板 + 图标浮在桌面上"看得出来。
-    # 路径要真实存在，否则取不到图标、只剩占位字母块。
-    quick = []
-    for exe, name in ((r"C:\Windows\System32\notepad.exe", "记事本"),
-                      (r"C:\Windows\explorer.exe", "文件资源管理器"),
-                      (r"C:\Windows\System32\mspaint.exe", "画图"),
-                      (r"C:\Windows\System32\calc.exe", "计算器")):
-        if Path(exe).exists():
-            quick.append({"path": exe, "name": name})
-    cfg.update({"quick_items": quick})
-    print(f"菜单栏常用启动：{[e['name'] for e in quick]}")
-
     # 演示数据：用**桌面上真实存在的快捷方式**（只读，不移动任何文件）。
     # 特意挑了几个"图标画布占比差得很远"的：Cpolar / Masm / SQL Server
     # 原来在 256×256 画布里只占 12%~18%，缩到 40px 后内容只剩几个像素；
@@ -152,6 +153,15 @@ def main() -> int:
                                          1_760_000_000))
     print(f"收纳面板演示项：{len(items)} 个")
 
+    # 菜单栏上摆几个常用启动，好让"纯透明底板 + 图标浮在桌面上"看得出来。
+    # 用**桌面上的真实快捷方式**（和用户实际"右键 → 加为常用"得到的东西一样）：
+    # 面板里那张卡片的名字直接取文件名，塞裸 exe 的话会显示成 "notepad" 这种。
+    quick = [{"path": str(item.path), "name": item.name} for item in items[:4]]
+    # 其中第 1 个本来就在收纳面板里 → 那张卡片显示左上角「－」，
+    # 其余卡片显示右上角「＋」—— 一张图就能同时看到两种角标。
+    cfg.update({"quick_items": quick})
+    print(f"菜单栏常用启动：{[e['name'] for e in quick]}")
+
     panel = MainPanel(cfg)
     panel.update_overview(items=items, nest_items=len(items), desktop_pending=3,
                           folders=1, shortcuts=0,
@@ -163,6 +173,12 @@ def main() -> int:
     browser = DesktopBrowser(cfg)
     browser.set_items(items)
     browser.set_bottom_reserve(lambda: dock.height() + 14)
+
+    # 三个演示窗口都要抬到最上层，否则会被前台的全屏程序（本机当时开着游戏）
+    # 盖住，截出来全是游戏画面。背景板先 show、这三个后 show，
+    # 同为 topmost 时后显示的在上层，正好是我们要的层次。
+    for demo_window in (panel, dock, browser):
+        force_top(demo_window)
 
     def grab_region(x0, y0, x1, y1, name: str) -> None:
         img = app.primaryScreen().grabWindow(0).toImage()
@@ -195,7 +211,7 @@ def main() -> int:
         app.processEvents()
         QTimer.singleShot(400, shoot_dock)
 
-    # ---- 第二张：底部菜单栏（只有主行，没有分页行）----
+    # ---- 第二张：底部菜单栏（只剩「桌面整理」入口 + 常用软件）----
     def shoot_dock():
         dock.show_bar()
         app.processEvents()
@@ -276,6 +292,31 @@ def main() -> int:
         y1 = max(p_tl.y() + browser.height(), d_tl.y() + dock.height()) * dpr + BOTTOM_MARGIN
         grab_region(x0, y0, x1, y1, "popup-glass.png")
         print("磨砂方案：%s（%s）" % (browser._glass_mode or "不可用", acrylic_describe()))
+        QTimer.singleShot(400, shoot_manage)
+
+    # ---- 第五张：管理模式（唯一的「管理」控件点亮后的角标）----
+    def shoot_manage():
+        browser.set_manage_mode(True)
+        app.processEvents()
+        QTimer.singleShot(900, capture_manage)
+
+    def capture_manage():
+        app.processEvents()
+        dpr = browser.devicePixelRatio() or 1.0
+        p_tl = browser.mapToGlobal(browser.rect().topLeft())
+        d_tl = dock.mapToGlobal(dock.rect().topLeft())
+        x0 = min(p_tl.x(), d_tl.x()) * dpr - MARGIN
+        y0 = min(p_tl.y(), d_tl.y()) * dpr - MARGIN
+        x1 = max(p_tl.x() + browser.width(), d_tl.x() + dock.width()) * dpr + MARGIN
+        y1 = max(p_tl.y() + browser.height(), d_tl.y() + dock.height()) * dpr + BOTTOM_MARGIN
+        grab_region(x0, y0, x1, y1, "popup-manage.png")
+        minus = sum(1 for t in browser._tiles
+                    if t.badge is not None and t.badge.text() == "－")
+        plus = sum(1 for t in browser._tiles
+                   if t.badge is not None and t.badge.text() == "＋")
+        print(f"管理模式角标：卡片区 左上角「－」{minus} 个、右上角「＋」{plus} 个；"
+              f"常用排 {len(browser._app_buttons)} 个全带「－」")
+        browser.set_manage_mode(False)
         app.quit()
 
     QTimer.singleShot(700, shoot_panel)

@@ -195,6 +195,17 @@ class IconLoader(QWidget):
     **已取到的图标会一直留在内存里**（`_cache`），翻页回来时直接复用。
     这一点很关键：如果翻页把缓存也丢掉，返回上一页就得重新去 Shell 取一遍，
     一旦那次取失败（Shell 偶发失败、文件被占用等），图标就会变成空白。
+
+    但缓存**不能只看 key**：同一个 key（路径）背后的文件是会变的——
+    最典型的就是本程序自己的启动流程：面板/菜单栏**先建好**（这时常用软件
+    还躺在桌面上、配置里记的收纳目录路径根本不存在），随后才把桌面收进来。
+    如果按 key 缓存，第一次取到的"通用白纸图标"就会被钉死一整个会话，
+    用户看到的就是"有些快捷方式的图标变成白纸，怎么刷新都不变"。
+
+    所以缓存里存的是 `(stamp, icon)`，`stamp` 由 `icons.icon_key()` 算出来
+    （路径 + 修改时间 + 大小）。文件一出现 / 一变化，stamp 就变，
+    下一次 `request()` 会真的重新取；取失败（返回 None）**不写缓存**，
+    调用方保留占位块，等下一次重建时再试。
     """
 
     ready = Signal(str, object)          # (key, QIcon)
@@ -205,51 +216,74 @@ class IconLoader(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(interval)
         self._timer.timeout.connect(self._drain)
-        self._cache: "dict[str, QIcon]" = {}
-        # (key, path, exe_hint, size, fallback_text, hi_res)
-        self._queue: "list[tuple[str, Path, Path | None, int, str, bool]]" = []
+        self._cache: "dict[str, tuple[str, QIcon]]" = {}
+        # (key, path, exe_hint, size, fallback_text, hi_res, stamp)
+        self._queue: "list[tuple[str, Path, Path | None, int, str, bool, str]]" = []
+
+    @staticmethod
+    def _stamp(path: Path, size: int) -> str:
+        """这个文件"当前长什么样"的指纹；文件不存在时是 `...|missing|...`。"""
+        try:
+            return icons.icon_key(Path(path), size)
+        except Exception:
+            return ""
 
     def cached(self, key: str) -> "QIcon | None":
-        return self._cache.get(key)
+        entry = self._cache.get(key)
+        return entry[1] if entry else None
 
     def request(self, key: str, path: Path, exe_hint: "Path | None", size: int,
                 fallback_text: str = "", hi_res: bool = False) -> None:
         """排一个取图标的活。
 
-        `hi_res=True` 走 `icons.get_icon_best()`——先取 256×256 的 jumbo 原图，
-        再由 Qt 缩到 `size`。菜单栏这种"图标要比 32px 大"的地方必须开，
-        否则就是把 32×32 硬拉大（原来"图标清晰度太低"的根因）。
-        列表 / 面板那种一次几百个图标的地方保持默认，省内存也省时间。
+        `hi_res=True` 走 `icons.get_icon_best()`——两条高清来源都试，
+        再由 Qt 缩到 `size`。菜单栏 / 收纳面板这种"图标要比 32px 大"的地方
+        必须开，否则就是把 32×32 硬拉大（"图标清晰度太低"的根因）。
+        主面板那种一次几百个 16px 小图标的列表保持默认，省内存也省时间。
+
+        `key` 是调用方的身份（路径 / `app:<路径>`），`path` 是**真正去取图标的
+        那个文件**——两者可以不同：常用软件记的是收纳目录里的路径，
+        而程序刚启动时那个文件还没被收进来，这时调用方会把桌面上的"孪生"
+        路径传进来取图，身份仍然是原来那个。
         """
-        if key in self._cache:
-            return
+        stamp = self._stamp(path, size)
+        entry = self._cache.get(key)
+        if entry is not None and entry[0] == stamp:
+            return                       # 同一份文件、同一个尺寸，已经有了
         for existing in self._queue:
-            if existing[0] == key:
+            if existing[0] == key and existing[6] == stamp:
                 return
-        self._queue.append((key, path, exe_hint, size, fallback_text, hi_res))
+        self._queue.append((key, path, exe_hint, size, fallback_text, hi_res,
+                            stamp))
         if not self._timer.isActive():
             self._timer.start()
+
+    def forget(self, key: str) -> None:
+        """丢掉某个 key 的缓存，让下一次 `request()` 真的重取。"""
+        self._cache.pop(key, None)
 
     def _drain(self) -> None:
         for _ in range(self._per_tick):
             if not self._queue:
                 self._timer.stop()
                 return
-            key, path, hint, size, fallback, hi_res = self._queue.pop(0)
-            if key in self._cache:
+            key, path, hint, size, fallback, hi_res, stamp = self._queue.pop(0)
+            entry = self._cache.get(key)
+            if entry is not None and entry[0] == stamp:
                 continue
-            icon = None
             if hi_res:
                 raw = icons.get_icon_best(path, size, exe_hint=hint)
             else:
                 raw = icons.get_icon(path, size, exe_hint=hint)
+            icon = None
             if raw is not None and getattr(raw, "is_valid", lambda: False)():
                 icon = raw_to_qicon(raw)
             if icon is None:
-                # 真图标取不到才用占位（圆角色块 + 首字）
-                color = PLACEHOLDER_COLORS.get("other", "#94A3B8")
-                icon = QIcon(letter_pixmap(fallback or Path(key).name, color, size))
-            self._cache[key] = icon
+                # 真图标取不到：**不写缓存**，调用方继续用它的占位块。
+                # 写进去的话，"文件还没到位"这一刻的失败就会被钉死一整个会话
+                # （"加了常用软件之后图标一直是白纸"就是这么来的）。
+                continue
+            self._cache[key] = (stamp, icon)
             self.ready.emit(key, icon)
 
     # ------------------------------------------------------------------

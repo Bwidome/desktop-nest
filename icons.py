@@ -13,9 +13,19 @@ Shell 内部会自己解析 .lnk、.url、.exe 的资源段、文件类型关联
 
 * `get_icon()`      —— `SHGetFileInfoW` 的 LARGEICON / SMALLICON，最大 32×32。
                        清单、列表这类小图标够用，也最省内存（几百个条目一起取）。
-* `get_icon_best()` —— `SHGetImageList(SHIL_JUMBO)` 拿 **256×256**，
-                       再交给 Qt 平滑缩到显示尺寸。菜单栏那种"图标要放大显示"
-                       的地方必须走这条，否则就是把 32×32 硬拉大，一片糊。
+* `get_icon_best()` —— 两条高清来源都试，挑内容更实的那张，再交给 Qt 平滑缩到
+                       显示尺寸。菜单栏 / 收纳面板这种"图标要放大显示"的地方
+                       必须走这条，否则就是把 32×32 硬拉大，一片糊。
+
+  高清的两条来源各有短板，所以**都要试**：
+
+  | 来源 | 长处 | 短板 |
+  | --- | --- | --- |
+  | `SHGetImageList(SHIL_JUMBO)` | 最贴近资源管理器看到的那张图标 | 程序自己没提供 256×256 时，Shell 会给一张 256 画布 + **左上角贴个 48 小图** |
+  | `PrivateExtractIconsW` 抽 exe/.ico 资源段 | 能按请求尺寸拿到真正的 256×256 | 看不到 .lnk 自定义图标、UWP 程序也没有资源段 |
+
+**路径不存在时一律返回 None**，绝不给"通用白纸图标"——那会被调用方当成真图标
+缓存起来，用户看到的就是"有些快捷方式的图标变成白纸，怎么刷新都不变"。
 
 因为图标要在后台线程里取（避免几百个文件卡住界面），这里只负责产出
 「原始像素 + 尺寸」这种纯数据，转成 Qt 图片的事情交给界面线程做。
@@ -270,29 +280,42 @@ def _shell_icon(path: Path, size: int) -> "RawIcon | None":
 
 
 def _extract_exe_icon(exe: Path, size: int) -> "RawIcon | None":
-    """直接从 exe 资源段取图标（快捷方式指向的程序常常能取到更清晰的大图）。"""
+    """直接从 exe / dll / .ico 的资源段里**按目标尺寸**取图标。
+
+    ⚠️ 这里曾经调用 `user32.PrivateExtractIconW`（单数）——**user32 根本没有
+    这个导出**（实测 `hasattr(user32, "PrivateExtractIconW")` 是 False），
+    每次调用都抛 AttributeError、被 `except Exception` 吞掉，
+    于是这个函数**从来就没成功过一次**。
+
+    后果很实在：Shell 的 jumbo 对"程序自己没提供 256×256"的条目会给一张
+    256×256 的画布、把 48×48 的小图贴在左上角（实测 Cpolar / Masm /
+    SQL Server / SakuraFrp 全是这样），我们只能把那张 48 的小图放大显示，
+    看着又糊又像"只画了一半"。
+
+    改用 `PrivateExtractIconsW(file, 0, cx, cy, &hicon, None, 1, 0)`：
+    它按请求的尺寸从资源里挑最合适的一张（必要时由系统缩放），
+    实测这几个程序都能拿到**真正的 256×256**。
+
+    先按调用方要的尺寸取一次，拿不到再按 256 取一次兜底——
+    有些老程序只有一张大图，按小尺寸去要反而失败。
+    """
     if not IS_WINDOWS or not exe.exists():
         return None
     try:
         user32 = ctypes.windll.user32
-        # 让 Windows 按目标尺寸从 exe 里挑最合适的那张图
-        hicon = user32.PrivateExtractIconW(0, str(exe), 0)
-        if not hicon:
-            large = ctypes.c_void_p()
-            small = ctypes.c_void_p()
-            count = ctypes.windll.shell32.ExtractIconExW(str(exe), 0,
-                                                         ctypes.byref(large),
-                                                         ctypes.byref(small), 1)
-            if not count:
-                return None
-            chosen = large if (size >= 32 and large.value) else small
-            other = small if chosen is large else large
-            if other.value:
-                user32.DestroyIcon(other)
-            hicon = chosen.value
-        if not hicon:
+        if not hasattr(user32, "PrivateExtractIconsW"):
             return None
-        return _hicon_to_raw(int(hicon))
+        wanted = [max(1, int(size)), JUMBO_SIZE]
+        for want in dict.fromkeys(wanted):
+            hicon = ctypes.c_void_p()
+            count = user32.PrivateExtractIconsW(str(exe), 0, want, want,
+                                                ctypes.byref(hicon), None, 1, 0)
+            if not count or not hicon.value:
+                continue
+            raw = _hicon_to_raw(int(hicon.value))      # 内部会 DestroyIcon
+            if raw is not None and raw.is_valid():
+                return raw
+        return None
     except Exception:
         return None
 
@@ -392,9 +415,10 @@ def icon_key(path: Path, size: int) -> str:
         stamp = f"{int(stat.st_mtime)}-{stat.st_size}"
     except OSError:
         stamp = "missing"
-    # 版本号 v2：jumbo 档加了"裁掉透明边距"，旧缓存里存的图是没裁过的，
+    # 版本号 v3：高清档改成"Shell jumbo 与 exe 资源段抽图二选一"，
+    # 旧缓存里存的还是那张"256 画布 + 左上角贴 48 小图"的糊图。
     # 不换版本号的话升级后拿到的还是老图，看着像没生效。
-    raw = f"{os.path.normcase(str(path))}|{stamp}|{size}|v2"
+    raw = f"{os.path.normcase(str(path))}|{stamp}|{size}|v3"
     return hashlib.sha1(raw.encode("utf-8", "surrogatepass")).hexdigest()[:20]
 
 
@@ -502,14 +526,45 @@ def crop_raw(raw: "RawIcon", box) -> "RawIcon":
     return RawIcon(width, height, b"".join(rows), raw.key)
 
 
+# 裁剪时四周留出的呼吸空间（按原图边长算，再保底 1px）。
+# 为什么不能"贴着内容裁"：`content_box` 的判据是 alpha > 8，而很多图标
+# 边缘是一圈很淡的投影 / 抗锯齿过渡，alpha 恰好落在 1~8 之间。
+# 严丝合缝地裁下去，那圈过渡就被切掉了，图标看着像被削掉一块
+# （用户说的"图标显示会有不完全"）。留一点点边就不切了。
+CROP_PAD_RATIO = 0.03
+
+
+def trim_raw(raw: "RawIcon", threshold: int = 8) -> "RawIcon":
+    """裁掉透明边距，并**在四周留一点点余量**。拿不到外接框就原样返回。"""
+    box = content_box(raw, threshold)
+    if box is None:
+        return raw
+    left, top, right, bottom = box
+    pad = max(1, int(round(max(raw.width, raw.height) * CROP_PAD_RATIO)))
+    left = max(0, left - pad)
+    top = max(0, top - pad)
+    right = min(raw.width, right + pad)
+    bottom = min(raw.height, bottom + pad)
+    return crop_raw(raw, (left, top, right, bottom))
+
+
 def get_icon(path: "Path | str", size: int = 32,
              exe_hint: "Path | None" = None) -> "RawIcon | None":
     """
     取图标（带内存缓存 + PNG 磁盘缓存）。
 
     exe_hint：当 path 是 .lnk 时，传它指向的 exe 可以拿到更清晰的大图标。
+
+    **文件不存在时直接返回 None**，不再给"通用类型图标"。
+    这条很重要：Shell 对不存在的路径会回一张**白纸图标**（"未知文件类型"），
+    而调用方（`IconLoader`）会把它当"真图标"缓存起来 —— 用户看到的就是
+    "有些快捷方式的图标变成了白纸，而且怎么刷新都不变"。
+    返回 None 时调用方会退回"圆角色块 + 首字"占位，并且**下次会重新取**，
+    等文件真的到位（比如程序把桌面收进收纳目录之后）图标就自己长出来了。
     """
     path = Path(path)
+    if not path.exists():
+        return None
     key = icon_key(path, size)
     cached = _MEMORY.get(key)
     if cached is not None:
@@ -540,27 +595,29 @@ def get_icon(path: "Path | str", size: int = 32,
 
 def get_icon_best(path: "Path | str", size: int = 32,
                   exe_hint: "Path | None" = None) -> "RawIcon | None":
-    """取**尽可能清晰**的图标：优先 256×256 的 jumbo 原图。
+    """取**尽可能清晰、尽可能完整**的图标。
 
-    为什么需要它（"菜单栏图标清晰度太低"的根因）：
+    为什么需要它（"图标清晰度太低 / 有的图标特别小"的根因）：
     `SHGetFileInfoW` 只有两档——`SHGFI_LARGEICON` 顶天 **32×32**，
-    `SHGFI_SMALLICON` 是 16×16；`PrivateExtractIconW` 当兜底时也常常只给 32×32。
-    菜单栏图标要显示 44 / 52 甚至更大，等于把 32×32 硬拉大，自然一片糊。
+    `SHGFI_SMALLICON` 是 16×16。菜单栏 / 收纳面板要显示 40 / 44 / 52，
+    等于把 32×32 硬拉大，自然一片糊。
 
-    这里换成 `SHGetImageList(SHIL_JUMBO)` 拿 **256×256**，
-    再让 Qt 平滑缩到显示尺寸（`QIcon` 内部用 `SmoothTransformation`）。
-    缩放这一步交给 Qt 还有个好处：高 DPI 下按物理像素请求也照样清晰。
+    两条高清来源都试一遍，挑内容更实的那张（见 `_largest_icon`）：
 
-    拿不到 jumbo（老系统 / 条目不存在）时**静默退回** `get_icon`，
-    行为跟改动前完全一致，不会因为新路径失败而没图标。
+    * `SHGetImageList(SHIL_JUMBO)` → 256×256（最贴近资源管理器看到的图标）；
+    * `PrivateExtractIconsW` 直接从 exe / .ico 资源段按 256 抽
+      （不受"Shell 只给 48×48"的限制）。
 
-    **另外还会裁掉四周的透明边距**（见 `content_box`）：jumbo 是 256×256
-    的画布，可有些软件的图标只在中间画一小块（实测最小只占 12%），
-    不裁的话缩到 40 / 48px 显示，内容只剩几个像素——用户说的
-    "会出现图标太小的情况"就是这么来的。裁完之后所有图标的内容
-    都会占满显示尺寸，大小就统一了。
+    最后再**裁掉四周的透明边距**（见 `trim_raw`）：jumbo 是 256×256 的画布，
+    可有些软件的图标只在中间画一小块，不裁的话缩到 40 / 48px 显示、
+    内容只剩几个像素——"有的图标看着特别小"就是这么来的。
+
+    拿不到高清（老系统 / 条目不存在）时**静默退回** `get_icon`；
+    文件根本不存在时返回 None（见 `get_icon` 的说明，避免"白纸图标"被缓存）。
     """
     path = Path(path)
+    if not path.exists():
+        return None
     key = icon_key(path, JUMBO_SIZE)
     cached = _MEMORY.get(key)
     if cached is not None:
@@ -570,23 +627,88 @@ def get_icon_best(path: "Path | str", size: int = 32,
         _MEMORY[key] = on_disk
         return on_disk
 
-    raw = _jumbo_icon(path)
-    if raw is None and exe_hint is not None:
-        raw = _jumbo_icon(Path(exe_hint))
-    if raw is None or not raw.is_valid() or raw.width < 32:
+    raw = _largest_icon(path, exe_hint)
+    if raw is None or not raw.is_valid() or raw.width < 16:
+        # 高清路都拿不到：退回 32px 档（它自己会做存在性检查）
         return get_icon(path, size, exe_hint)
-
-    # 裁掉四周的透明边距。jumbo 图是 256×256 的画布，但有些软件的图标
-    # 只在中间画一小块（实测最小只占 12%），不裁的话缩到显示尺寸后
-    # 内容只剩几个像素——"有的图标看着特别小"就是这么来的。
-    box = content_box(raw)
-    if box is not None:
-        raw = crop_raw(raw, box)
 
     raw = RawIcon(raw.width, raw.height, raw.bgra, key)
     _MEMORY[key] = raw
     _save_png(raw)
     return raw
+
+
+def _largest_icon(path: Path, exe_hint: "Path | None") -> "RawIcon | None":
+    """在两条高清来源里挑**内容更实**的那张，并裁掉透明边距。
+
+    两条来源各有短板，所以要都试：
+
+    * `_jumbo_icon()`（Shell 的 jumbo 列表）——最贴近资源管理器看到的图标，
+      但**程序自己没提供 256×256 时，Shell 会给一张 256×256 的画布、
+      把 48×48 的小图贴在左上角**（实测 Cpolar / Masm / SQL Server /
+      SakuraFrp 都是这样）。裁剪之后只剩 40~48 px，放到 40 / 44 的显示尺寸
+      上勉强够，一放大就糊。
+    * `_extract_exe_icon()`（直接从 exe / .ico 资源段抽）——不受上面那条
+      限制，实测同一批程序都能拿到真正的 256×256。
+
+    判据用"裁剪后的内容面积"，谁大用谁：
+    * Cpolar   Shell 40×43 = 1720     直抽 216×236 = 50976  → 用直抽；
+    * Apifox   Shell 256×256          直抽 256×256          → 面积相同，留 Shell 的
+      （Shell 才是"资源管理器里看到的那张"，能照顾到 .lnk 自定义图标）。
+    """
+    candidates = []
+
+    shell = _jumbo_icon(path)
+    if shell is None and exe_hint is not None:
+        shell = _jumbo_icon(Path(exe_hint))
+    if shell is not None and shell.is_valid():
+        candidates.append(trim_raw(shell))
+
+    source = Path(exe_hint) if exe_hint is not None else path
+    direct = _extract_exe_icon(source, JUMBO_SIZE)
+    if direct is None and source != path:
+        direct = _extract_exe_icon(path, JUMBO_SIZE)
+    if direct is not None and direct.is_valid():
+        candidates.append(trim_raw(direct))
+
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    shell_ok = not _looks_like_generic_page(candidates[0])
+    direct_ok = not _looks_like_generic_page(candidates[1])
+    if shell_ok != direct_ok:
+        # 有一张明显是"未知文件类型"的白纸：另一张不管多小都比它强。
+        # 这一步专治"有些快捷方式的图标变成白纸"——Shell 解析不出 .lnk 的
+        # 目标时会回白纸，而直接从 exe 资源段抽能绕开这个失败。
+        return candidates[0] if shell_ok else candidates[1]
+    return max(candidates, key=lambda item: item.width * item.height)
+
+
+# "未知文件类型"那张白纸：内容几乎全是接近白色、低饱和的像素，
+# 而且**竖着比横着长**（一张纸的比例）。
+# 加高度这一条是为了别误伤真正以白色为主的图标（百度网盘、微信开发者工具
+# 都是 256×256 的正方形白底），它们的宽高基本相等。
+GENERIC_WHITE_RATIO = 0.70
+
+
+def _looks_like_generic_page(raw: "RawIcon") -> bool:
+    """这张图是不是 Shell 那张"未知文件类型"的白纸图标？"""
+    if raw.width <= 0 or raw.height <= 0 or raw.height < raw.width:
+        return False
+    data = raw.bgra
+    total = 0
+    white = 0
+    for index in range(0, len(data), 4):
+        alpha = data[index + 3]
+        if alpha <= 8:
+            continue
+        total += 1
+        blue, green, red = data[index], data[index + 1], data[index + 2]
+        if (red > 225 and green > 225 and blue > 225
+                and max(red, green, blue) - min(red, green, blue) < 14):
+            white += 1
+    return total > 0 and white / total >= GENERIC_WHITE_RATIO
 
 
 def clear_cache() -> int:

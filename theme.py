@@ -557,19 +557,47 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
 #AppButton:pressed {{
     background: {c['pressed']};
 }}
-#AppAdd {{
+/* 唯一的控制按钮：管理（原来是「＋添加」+「－删除」两个） */
+#AppManage {{
     background: transparent;
     border: 1px dashed {c['border_strong']};
     border-radius: 10px;
     color: {c['text_sub']};
     font-size: 8.25pt;
 }}
-#AppAdd:hover {{
+#AppManage:hover {{
     background: {c['hover']};
     border-color: {c['accent']};
     color: {c['accent']};
 }}
+#AppManage:checked {{
+    background: {c['accent_soft']};
+    border: 1px solid {c['accent']};
+    color: {c['accent']};
+}}
 #TileName {{ font-size: 9pt; }}
+
+/* ---------- 管理模式下卡片角上的「＋ / －」 ---------- */
+/* 20×20 的小圆钮。给足对比度：它压在图标上，底色太淡就分不清是按钮还是图标的一部分。 */
+#BadgeAdd, #BadgeRemove {{
+    border-radius: 10px;
+    font-size: 11pt;
+    font-weight: 700;
+    padding: 0px;
+}}
+#BadgeAdd {{
+    background: {c['accent']};
+    color: #FFFFFF;
+    border: 1px solid rgba(255, 255, 255, 190);
+}}
+#BadgeRemove {{
+    background: {c['danger']};
+    color: #2A1310;
+    border: 1px solid rgba(255, 255, 255, 190);
+}}
+#BadgeAdd:hover, #BadgeRemove:hover {{
+    border: 2px solid #FFFFFF;
+}}
 /* ---------- 文件网格卡片 ---------- */
 #FileTile {{
     background: transparent;

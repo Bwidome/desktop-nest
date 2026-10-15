@@ -63,6 +63,48 @@ APP_ICON = 34
 # （见 `set_bottom_reserve`）——写死一个值的话，菜单栏一变高，面板就会压在它身上。
 DEFAULT_BOTTOM_RESERVE = 84
 
+# 管理模式里贴在卡片角上的「＋ / －」小圆钮
+BADGE_SIZE = 20
+
+
+class ManageBadge(QToolButton):
+    """管理模式下贴在卡片角上的「＋ / －」小圆钮。
+
+    需求：「收纳面板里的添加和删除控件整合成一个管理控件，点击后，
+    如果是常用软件的话左上角有个减号，如果不是的话右上角有个加号」。
+
+    做成**卡片的子控件**而不是自绘：子控件会自己吃掉鼠标事件，
+    点角上的加号不会顺带把卡片本身点开（那是"打开程序"，误触代价太大）。
+    """
+
+    def __init__(self, parent, *, remove: bool, tooltip: str, slot,
+                 corner: str):
+        super().__init__(parent)
+        # 减号（移出常用）用暖色、加号（加进常用）用主色，一眼能分清
+        self.setObjectName("BadgeRemove" if remove else "BadgeAdd")
+        self._corner = corner
+        self.setText("－" if remove else "＋")
+        self.setToolTip(tooltip)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setFixedSize(BADGE_SIZE, BADGE_SIZE)
+        self.clicked.connect(slot)
+        self.hide()
+
+    def place(self) -> None:
+        """贴到父控件的角上（父控件尺寸是固定的，建好就能摆）。"""
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        x = (parent.width() - BADGE_SIZE - 2
+             if self._corner == "top-right" else 2)
+        self.move(max(0, x), 2)
+        self.raise_()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self.place()
+
 
 class ItemTile(QFrame):
     """网格里的一个卡片：**图标在上、名称在下**。"""
@@ -77,6 +119,8 @@ class ItemTile(QFrame):
         self.item = item
         self.p = palette
         self.selected = False
+        # 管理模式下贴在角上的「＋ / －」；由面板在需要时挂上来（见 _attach_badge）
+        self.badge: "ManageBadge | None" = None
         self.setObjectName("FileTile")
         self.setFixedSize(CELL_W - 8, CELL_H - 8)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -108,6 +152,11 @@ class ItemTile(QFrame):
     def set_icon(self, icon) -> None:
         if icon is not None and not icon.isNull():
             self.icon_label.setPixmap(pixmap_for(icon, GRID_ICON, self.icon_label))
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self.badge is not None:
+            self.badge.place()
 
     def set_selected(self, value: bool) -> None:
         if self.selected != value:
@@ -150,6 +199,8 @@ class AppButton(QToolButton):
         super().__init__(parent)
         self.app_name = name
         self.path = path
+        # 管理模式下的「－」（常用软件 → 左上角减号）；由面板挂上来
+        self.badge: "ManageBadge | None" = None
         self.setObjectName("AppButton")
         self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.setIconSize(QSize(APP_ICON, APP_ICON))
@@ -166,6 +217,11 @@ class AppButton(QToolButton):
     @staticmethod
     def _elide(text: str, limit: int = 5) -> str:
         return text if len(text) <= limit else text[: limit - 1] + "…"
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self.badge is not None:
+            self.badge.place()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(
@@ -201,6 +257,8 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         self._page = 0
         self._per_page = int(cfg.get("page_size", DEFAULT_PER_PAGE) or DEFAULT_PER_PAGE)
         self._selected: "engine.RepoItem | None" = None
+        # 管理模式：卡片角上长出「＋ / －」角标（由唯一的「管理」控件开关）
+        self._manage_mode = False
         # 贴底时给底部菜单栏让开多少高度（由主程序注入 Dock 的真实高度）
         self._reserve_provider = None
 
@@ -433,51 +491,172 @@ class DesktopBrowser(GlassCardMixin, QWidget):
             button.context_requested.connect(self._app_menu)
             self.apps_row.addWidget(button)
             self._app_buttons.append(button)
-            key = f"app:{path}"
-            # 已经取过的图标直接贴上——不要依赖排队再发信号，
-            # 否则每翻一页那排常用启动都会闪一下空白。
-            cached_icon = self.loader.cached(key)
-            if cached_icon is not None:
-                button.setIcon(cached_icon)
-            else:
-                # hi_res=True：这一排要显示 APP_ICON(34px) 的图标，
-                # 而 SHGetFileInfoW 顶天只给 32×32，硬拉到 34 就糊了。
-                # 走 get_icon_best() 拿 256×256 原图再由 Qt 缩下来。
-                self.loader.request(key, path, icon_hint_for(path),
-                                     ICON_REQUEST, name, hi_res=True)
+            self._attach_quick_badge(button, path)
+            self._request_icon(f"app:{path}", path, name, button.setIcon)
 
-        self.btn_add_app = QToolButton(self.apps_host)
-        self.btn_add_app.setObjectName("AppAdd")
-        self.btn_add_app.setText("＋\n添加")
-        self.btn_add_app.setToolTip("把程序或文件加到常用启动（可多选批量添加）")
-        self.btn_add_app.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_add_app.setFixedSize(78, 66)
-        self.btn_add_app.clicked.connect(self._show_add_menu)
-        self.apps_row.addWidget(self.btn_add_app)
-
-        # ---- 删除按钮：紧挨着「＋添加」，批量移除常用启动 ----
-        self.btn_del_app = QToolButton(self.apps_host)
-        self.btn_del_app.setObjectName("AppDel")
-        self.btn_del_app.setText("－\n删除")
-        self.btn_del_app.setToolTip("从常用启动里批量移除（可多选）")
-        self.btn_del_app.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_del_app.setFixedSize(78, 66)
-        self.btn_del_app.clicked.connect(self.remove_quick_dialog)
-        # 一个都没有时没什么可删的，直接禁用，别让用户点了个空弹窗
-        self.btn_del_app.setEnabled(bool(self._app_buttons))
-        self.apps_row.addWidget(self.btn_del_app)
+        # ---- 唯一的控制按钮：管理 ----
+        # 需求：「添加和删除控件整合成一个管理控件，点击后，如果是常用软件
+        # 的话左上角有个减号，如果不是的话右上角有个加号」。
+        # 所以这里不再有「＋添加」「－删除」两个按钮，只有这一个开关：
+        # 点一下进管理模式，每个卡片角上长出对应的角标；再点一下退出。
+        self.btn_manage = QToolButton(self.apps_host)
+        self.btn_manage.setObjectName("AppManage")
+        self.btn_manage.setCheckable(True)
+        self.btn_manage.setChecked(self._manage_mode)
+        self.btn_manage.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_manage.setFixedSize(78, 66)
+        self._sync_manage_button()
+        self.btn_manage.clicked.connect(self.toggle_manage_mode)
+        self.apps_row.addWidget(self.btn_manage)
 
         self.apps_row.addStretch(1)
-        # 没有任何常用项时「删除」没有意义，直接禁用（重建时也要重新判一次，
-        # 否则删空之后按钮还亮着，点了只弹一个空弹窗）
-        if hasattr(self, "btn_del_app"):
-            self.btn_del_app.setEnabled(bool(self._app_buttons))
         # 增删之后行数/宽度会变，重新排一次版，避免留下空白
         self.apps_host.updateGeometry()
 
     def rebuild_apps(self) -> None:
         """公开的"重建常用启动这一排"入口（供主程序信号回调调用）。"""
         self._rebuild_apps()
+
+    # ------------------------------------------------------------------
+    # 图标：统一走"孪生路径 + 自愈缓存"
+    # ------------------------------------------------------------------
+    def _request_icon(self, key: str, path: Path, name: str, setter) -> None:
+        """给一个控件取图标；`setter(icon)` 负责把图标贴上去。
+
+        （`AppButton` 是 `setIcon`、`ItemTile` 是 `set_icon`，所以传一个
+        setter 进来，而不是硬编码某个方法名。）
+
+        两个关键点：
+
+        1. **本体不在就用孪生路径**。常用软件记的是"上次它在的位置"，
+           程序刚启动、东西还没收进来时那个路径是不存在的；直接去取，
+           Shell 会回一张"未知文件类型"的白纸图标。`nest.icon_source()`
+           会自动改读桌面上的那一份，图标立刻就是对的。
+        2. **两边都没有就干脆不请求**，让控件留着占位色块。
+           这样不会把"暂时取不到"钉进缓存，等下一次重建（收完桌面）
+           再取就是真图标了。
+        """
+        cached_icon = self.loader.cached(key)
+        if cached_icon is not None:
+            setter(cached_icon)
+        source = nest.icon_source(path, self.cfg.desktop)
+        if source is None:
+            return
+        # hi_res=True：这一排要显示 APP_ICON(34px) 的图标，
+        # 而 SHGetFileInfoW 顶天只给 32×32，硬拉到 34 就糊了。
+        # 走 get_icon_best() 拿 256×256 原图再由 Qt 缩下来。
+        self.loader.request(key, source, icon_hint_for(source),
+                            ICON_REQUEST, name, hi_res=True)
+
+    def _attach_quick_badge(self, button: AppButton, path: Path) -> None:
+        """给"常用软件"挂上左上角的减号（只在管理模式里露出来）。"""
+        if button.badge is not None:
+            button.badge.deleteLater()
+        badge = ManageBadge(
+            button, remove=True, corner="top-left",
+            tooltip=f"从常用启动移除「{path.stem or path.name}」\n（只移除这一排快捷方式，不动文件）",
+            slot=lambda _checked=False, p=path: self.remove_quick_path(p))
+        button.badge = badge
+        badge.setVisible(self._manage_mode)
+
+    def _attach_tile_badge(self, tile: ItemTile) -> None:
+        """给网格卡片挂角标：常用软件是左上角减号，其余是右上角加号。"""
+        if tile.badge is not None:
+            tile.badge.deleteLater()
+            tile.badge = None
+        item = tile.item
+        if self.cfg.is_quick(item.path):
+            badge = ManageBadge(
+                tile, remove=True, corner="top-left",
+                tooltip=f"把「{item.name}」移出常用启动\n（不动文件）",
+                slot=lambda _checked=False, i=item: self.remove_quick_path(i.path))
+        else:
+            badge = ManageBadge(
+                tile, remove=False, corner="top-right",
+                tooltip=f"把「{item.name}」加到常用启动",
+                slot=lambda _checked=False, i=item: self.add_item_to_apps(i))
+        tile.badge = badge
+        badge.setVisible(self._manage_mode)
+
+    # ------------------------------------------------------------------
+    # 管理模式
+    # ------------------------------------------------------------------
+    def toggle_manage_mode(self) -> None:
+        """开关管理模式（唯一的"管理"控件）。"""
+        self.set_manage_mode(not self._manage_mode)
+
+    def set_manage_mode(self, value: bool) -> None:
+        """进入 / 退出管理模式：卡片角上长出「＋ / －」角标。
+
+        退出时顺手把高亮也清掉——管理模式下用户点的是角标，
+        卡片本身那块高亮留着只会让人以为还没操作完。
+        """
+        self._manage_mode = bool(value)
+        for button in self._app_buttons:
+            if button.badge is not None:
+                button.badge.setVisible(self._manage_mode)
+        for tile in self._tiles:
+            if tile.badge is not None:
+                tile.badge.setVisible(self._manage_mode)
+        self._sync_manage_button()
+        self._update_buttons()
+        if self._manage_mode:
+            self.hint.setText("管理模式：点卡片角上的 ＋ 加入常用，点 － 移出")
+        else:
+            self._refresh_hint()
+
+    def _sync_manage_button(self) -> None:
+        button = getattr(self, "btn_manage", None)
+        if button is None:
+            return
+        button.setChecked(self._manage_mode)
+        button.setText("✓\n完成" if self._manage_mode else "⚙\n管理")
+        button.setToolTip("退出管理模式" if self._manage_mode
+                          else "管理常用软件：加号加入、减号移出（也可右键单个软件）")
+
+    def _refresh_hint(self) -> None:
+        """把底部提示恢复成"这一页有多少东西"的那句话。"""
+        folders = sum(1 for i in self._items if i.is_dir)
+        shortcuts = sum(1 for i in self._items if i.kind == "shortcut")
+        files = len(self._items) - folders - shortcuts
+        if self.search.text().strip():
+            self.hint.setText(f"命中 {len(self._matches)} 项")
+        else:
+            self.hint.setText(
+                f"共 {len(self._items)} 项（快捷方式 {shortcuts} · 文件夹 {folders}"
+                f" · 文件 {files}）　每页 {self._per_page}")
+
+    # ------------------------------------------------------------------
+    # 单个条目的增删（角标 / 右键菜单都走这里）
+    # ------------------------------------------------------------------
+    def add_item_to_apps(self, item: "engine.RepoItem") -> bool:
+        """把**指定条目**加进常用启动。
+
+        参数显式传进来，不再依赖 `self._selected`：右键菜单是**模态**的，
+        菜单打开期间那个"单击 1.2 秒后自动取消高亮"的定时器会照常触发，
+        `_selected` 被清成 None，于是 `add_selected_to_apps()` 直接 return，
+        用户看着就是"点了没反应，得再点一次"（需求里的
+        "有时要点击多次才能成功添加"）。
+        """
+        name = item.path.stem if item.path.suffix else item.name
+        if self.cfg.add_quick(item.path, name):
+            self._rebuild_apps()
+            self._render_page()
+            self.request_quick_changed.emit()
+            self.hint.setText(f"已把「{item.name}」加到常用启动")
+            return True
+        self.hint.setText(f"「{item.name}」已经在常用启动里了")
+        return False
+
+    def remove_quick_path(self, path: Path) -> bool:
+        """把某个路径移出常用启动（角标 / 右键菜单都走这里）。"""
+        if not self.cfg.remove_quick(path):
+            return False
+        self._rebuild_apps()
+        self._render_page()
+        self.request_quick_changed.emit()
+        self.hint.setText(f"已把「{Path(path).stem or Path(path).name}」移出常用启动")
+        return True
 
     # ------------------------------------------------------------------
     # 常用启动：批量添加 / 批量删除
@@ -524,6 +703,9 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         added = self.cfg.add_quick_many(
             [(p, self._quick_name(by_key[p].path)) for p in chosen if p in by_key])
         self.rebuild_apps()
+        # 卡片角上的「＋ / －」是按"是不是常用"长出来的，增删之后必须重画，
+        # 否则刚加进去的那张卡片还挂着加号、已经移除的还挂着减号。
+        self._render_page()
         self.request_quick_changed.emit()
         self.hint.setText(f"已把 {added} 项加入常用启动" if added else "这些项目已经在常用启动里了")
 
@@ -544,6 +726,7 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         removed = self.cfg.remove_quick_many(chosen)
         # 先重建 UI 再通知外面：保证"配置—UI"两边的顺序、数量完全一致
         self.rebuild_apps()
+        self._render_page()          # 角标跟着"是不是常用"变，要重画
         self.request_quick_changed.emit()
         self.hint.setText(f"已移除 {removed} 项")
 
@@ -566,18 +749,22 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         elif chosen is action_reveal:
             engine.open_in_explorer(button.path)
         elif chosen is action_remove:
-            self.cfg.remove_quick(button.path)
-            self._rebuild_apps()
-            self.request_quick_changed.emit()
+            self.remove_quick_path(button.path)
 
-    def _show_add_menu(self) -> None:
+    def _show_add_menu(self, anchor: "QWidget | None" = None) -> None:
+        """「从文件添加常用软件」的入口。
+
+        「管理」控件只负责"从这一页挑"（角上的加号），
+        想加面板里没有的程序就走这里；`anchor` 决定菜单弹在哪个控件下面。
+        """
         from qt_compat import QFileDialog
 
+        anchor = anchor or self.btn_manage
         menu = QMenu(self)
         action_here = menu.addAction("从下面的列表里选…（可多选）")
         action_file = menu.addAction("浏览文件…")
-        chosen = popup_menu(menu, self.btn_add_app.mapToGlobal(
-            QPoint(0, self.btn_add_app.height())))
+        chosen = popup_menu(menu, anchor.mapToGlobal(
+            QPoint(0, anchor.height())))
         if chosen is None:
             return
         if chosen is action_here:
@@ -592,6 +779,7 @@ class DesktopBrowser(GlassCardMixin, QWidget):
                 target = Path(path)
                 if self.cfg.add_quick(target, target.stem):
                     self.rebuild_apps()
+                    self._render_page()
                     self.request_quick_changed.emit()
             return
 
@@ -654,18 +842,10 @@ class DesktopBrowser(GlassCardMixin, QWidget):
             tile.context_requested.connect(self._show_tile_menu)
             self.grid.addWidget(tile, index // columns, index % columns)
             self._tiles.append(tile)
-            key = str(item.path)
-            hint = icon_hint_for(item.path, item.kind)
+            self._attach_tile_badge(tile)
             # 缓存里已经有就直接贴上。只调 request() 是不够的——它在命中缓存时
             # 会直接返回、不再发信号，新卡片就永远等不到图标（翻页回来一片空白的原因）。
-            cached_icon = self.loader.cached(key)
-            if cached_icon is not None:
-                tile.set_icon(cached_icon)
-            else:
-                # 网格里的图标显示 GRID_ICON(48px)，比 32×32 的 LARGEICON 大，
-                # 不开 hi_res 就是硬放大 → 糊。这里和菜单栏用同一套 256px 原图。
-                self.loader.request(key, item.path, hint, ICON_REQUEST, item.name,
-                                    hi_res=True)
+            self._request_icon(str(item.path), item.path, item.name, tile.set_icon)
 
         total_cells = ((len(page_items) + columns - 1) // columns) * columns
         for index in range(len(page_items), total_cells):
@@ -689,16 +869,10 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         self.btn_next.setEnabled(self._page < pages - 1)
         self.btn_last.setEnabled(self._page < pages - 1)
 
-        folders = sum(1 for i in self._items if i.is_dir)
-        shortcuts = sum(1 for i in self._items if i.kind == "shortcut")
-        files = len(self._items) - folders - shortcuts
         self.badge.setText(f"{len(self._matches)} 项")
-        if self.search.text().strip():
-            self.hint.setText(f"命中 {len(self._matches)} 项")
-        else:
-            self.hint.setText(
-                f"共 {len(self._items)} 项（快捷方式 {shortcuts} · 文件夹 {folders}"
-                f" · 文件 {files}）　每页 {self._per_page}")
+        if not self._manage_mode:
+            # 管理模式下那句"点角上的 ＋ / －"要留着，不能被统计信息顶掉
+            self._refresh_hint()
         self._update_buttons()
 
     def _on_icon_ready(self, key: str, icon) -> None:
@@ -757,22 +931,23 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         if not ok:
             QMessageBox.warning(self, "打不开", f"{item.name}\n\n{reason}")
 
-    def add_selected_to_apps(self) -> None:
-        if self._selected is None:
-            return
-        item = self._selected
-        name = item.path.stem if item.path.suffix else item.name
-        if self.cfg.add_quick(item.path, name):
-            self._rebuild_apps()
-            self.request_quick_changed.emit()
-            self.hint.setText(f"已把「{item.name}」加到常用启动")
-        else:
-            self.hint.setText(f"「{item.name}」已经在常用启动里了")
+    def add_selected_to_apps(self, item: "engine.RepoItem | None" = None) -> None:
+        """把条目加进常用启动。
 
-    def restore_selected(self) -> None:
-        if self._selected is None:
+        `item` 显式给定时用它，不给才退回当前选中项。右键菜单一定要显式给
+        ——菜单是模态的，打开期间高亮定时器会把 `_selected` 清掉，
+        光靠 `self._selected` 会出现"点了没反应，得再点一次"。
+        """
+        target = item if item is not None else self._selected
+        if target is None:
             return
-        item = self._selected
+        self.add_item_to_apps(target)
+
+    def restore_selected(self, item: "engine.RepoItem | None" = None) -> None:
+        target = item if item is not None else self._selected
+        if target is None:
+            return
+        item = target
         if QMessageBox.question(
                 self, "还原到桌面",
                 f"把「{item.name}」放回桌面？\n\n文件只是移动，不会被删除。",
@@ -795,7 +970,13 @@ class DesktopBrowser(GlassCardMixin, QWidget):
     # 右键
     # ------------------------------------------------------------------
     def _show_tile_menu(self, item: "engine.RepoItem", pos) -> None:
-        self.select_item(item)
+        # ⚠️ `auto_clear=False` 是必须的。菜单是**模态**的，会跑一个嵌套事件
+        # 循环，那个"单击后 1.2 秒自动取消高亮"的定时器照常触发、
+        # 把 `self._selected` 清成 None。菜单里的动作若依赖 `_selected`
+        # （老的"加为常用启动"就是），用户就得"点好几次才成功一次"。
+        # 现在既关掉自动清除，动作也改成显式传 item，双保险。
+        self.select_item(item, auto_clear=False)
+        self._highlight_timer.stop()
         is_system = (item.kind == "shortcut"
                      and bool(nest.shell_path_for(item.path)))
         menu = QMenu(self)
@@ -816,14 +997,13 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         elif action_reveal is not None and chosen is action_reveal:
             engine.open_in_explorer(item.path)
         elif chosen is action_add:
+            # 显式把 item 传下去，不看 `_selected`（菜单是模态的，见上面的说明）
             if self.cfg.is_quick(item.path):
-                self.cfg.remove_quick(item.path)
-                self._rebuild_apps()
-                self.request_quick_changed.emit()
+                self.remove_quick_path(item.path)
             else:
-                self.add_selected_to_apps()
+                self.add_item_to_apps(item)
         elif chosen is action_restore:
-            self.restore_selected()
+            self.restore_selected(item)
         elif chosen is action_copy:
             QApplication.clipboard().setText(str(item.path))
             self.hint.setText("路径已复制")
@@ -842,11 +1022,24 @@ class DesktopBrowser(GlassCardMixin, QWidget):
             action.setChecked(size == self._per_page)
             action.triggered.connect(lambda _checked=False, s=size: self.set_per_page(s))
         menu.addSeparator()
+        action_manage = menu.addAction("退出管理模式" if self._manage_mode
+                                       else "管理常用软件")
+        action_add_file = menu.addAction("从文件添加常用软件…")
+        # 常用的东西一多，逐个点角上的减号很烦；批量移除的入口留在这儿
+        action_remove_many = menu.addAction("批量移除常用软件…")
         action_restore_all = menu.addAction("全部还原到桌面")
         action_settings = menu.addAction("设置…")
         action_hide = menu.addAction("隐藏")
         chosen = popup_menu(menu, self.btn_more.mapToGlobal(QPoint(0, self.btn_more.height())))
-        if chosen is action_restore_all:
+        if chosen is action_manage:
+            self.toggle_manage_mode()
+        elif chosen is action_add_file:
+            # 「管理」控件只负责"从这一页挑"；想加面板里没有的程序，
+            # 走这里（老的批量多选弹窗也仍然保留，见 add_quick_dialog）
+            self._show_add_menu()
+        elif chosen is action_remove_many:
+            self.remove_quick_dialog()
+        elif chosen is action_restore_all:
             self.request_restore_all.emit()
         elif chosen is action_settings:
             self.request_settings.emit()

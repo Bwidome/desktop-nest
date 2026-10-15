@@ -286,11 +286,14 @@ def main() -> int:
           not hasattr(dock, "rebuild_strip") and not hasattr(dock, "strip_pages")
           and not hasattr(dock, "toggle_strip"))
     check("配置里也没有分页行开关了", "dock_strip_visible" not in config_mod.DEFAULTS)
-    check("收纳内容仍保留为「＋ 添加」的候选",
+    check("收纳内容仍保留为面板「管理」控件的候选",
           len(dock._items) == len(items), f"{len(dock._items)} vs {len(items)}")
-    check("主行控件齐全：＋ / ⚙ / ✕",
-          hasattr(dock, "add_btn") and hasattr(dock, "settings_btn")
-          and hasattr(dock, "btn_hide_dock"))
+    # 需求：「主菜单栏就保留第一个控件和常用软件，其他的控件加号减号齿轮×删除」
+    check("主行只剩第一个控件 + 常用软件（＋ / － / ⚙ / ✕ 已删除）",
+          not any(hasattr(dock, name) for name in
+                  ("add_btn", "del_btn", "settings_btn", "btn_hide_dock")),
+          str([a for a in ("add_btn", "del_btn", "settings_btn", "btn_hide_dock")
+               if hasattr(dock, a)]))
     check("常用启动行还在", dock.desktop_btn.isVisible())
 
     fired = []
@@ -309,15 +312,19 @@ def main() -> int:
           f"{dock.y() + dock.height()} vs {dock.screen().availableGeometry().bottom()}")
 
     print()
-    print("── 6b. Dock 上的控制按钮 ──")
-    check("有「隐藏整条菜单栏」按钮", hasattr(dock, "btn_hide_dock"))
-    check("有「设置」按钮", hasattr(dock, "settings_btn"))
+    print("── 6b. 隐藏 / 显示菜单栏（按钮已删除，能力搬到托盘菜单）──")
+    check("菜单栏上不再有「隐藏整条菜单栏」按钮",
+          not hasattr(dock, "btn_hide_dock"))
+    check("菜单栏上不再有「设置」按钮", not hasattr(dock, "settings_btn"))
+    check("隐藏 / 显示的能力本身还在（hide_self / show_bar）",
+          callable(getattr(dock, "hide_self", None))
+          and callable(getattr(dock, "show_bar", None)))
 
     hidden_signals = []
     dock.hide_requested.connect(lambda: hidden_signals.append(True))
     dock.hide_self()
     app.processEvents()
-    check("点隐藏按钮后菜单栏消失", not dock.isVisible())
+    check("隐藏后菜单栏消失", not dock.isVisible())
     check("隐藏状态写进配置", cfg.get("dock_visible") is False)
     check("会广播隐藏事件（好让托盘菜单同步）", hidden_signals == [True],
           str(hidden_signals))

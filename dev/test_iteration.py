@@ -7,8 +7,10 @@
 
 BUG1  右键「常见应用」崩溃 / 崩溃要能自动还原桌面
 BUG2  常用软件图标、增删后 UI 同步、不留空白
+      —— 增删已合并成唯一的「管理」控件（常用项左上角－、非常用项右上角＋），
+         菜单栏上不再有 ＋ / － / ⚙ / ✕
 BUG3  Dock 只对最大化/全屏避让，普通窗口与桌面空闲不隐藏、不闪烁
-功能4 复选框多选批量添加 + 新增删除按钮多选批量删除
+功能4 复选框多选批量添加 / 批量删除（入口在「管理」控件里）
 
 用法：python dev/test_iteration.py
 """
@@ -266,13 +268,19 @@ def main() -> int:
              if b.icon() is None or b.icon().isNull()]
     check("批量添加后图标都加载出来了", not empty, f"空的: {empty}")
 
-    # 再加一个，旧的图标不能丢
+    # 再加一个，旧的图标不能丢。
+    # 这里**故意用不存在的路径**：新加的"路径不存在就返回 None"闸门会拒绝
+    # 给它图标（这道闸门就是修白纸图标的），所以只要求老的三项不被带崩。
     cfg.add_quick_many([(desktop / "新软件.lnk", "新软件")])
     browser.rebuild_apps()
     pump(2.5)
-    empty2 = [b.app_name for b in browser._app_buttons
-              if b.icon() is None or b.icon().isNull()]
-    check("加新项后旧项图标仍在", not empty2, f"空的: {empty2}")
+    stale = [b.app_name for b in browser._app_buttons
+             if b.app_name != "新软件" and (b.icon() is None or b.icon().isNull())]
+    check("加新项后旧项图标仍在", not stale, f"丢图的: {stale}")
+    ghost = next((b for b in browser._app_buttons if b.app_name == "新软件"), None)
+    check("不存在的路径不再伪造白纸图标（闸门生效）",
+          ghost is not None and (ghost.icon() is None or ghost.icon().isNull()),
+          f"icon={None if ghost is None else ghost.icon()}")
 
     # 批量删除
     def fake_multi_del(title, hint, entries, confirm_text="确定", parent=None):
@@ -293,7 +301,7 @@ def main() -> int:
           f"{[b.app_name for b in browser._app_buttons]} vs "
           f"{[e['name'] for e in cfg.quick_items]}")
 
-    # 不留空白：布局 widget 数 = 配置数 + 2 个按钮
+    # 不留空白：布局里的 AppButton 数 = 配置数
     from desktop_browser import AppButton
 
     live = []
@@ -304,27 +312,92 @@ def main() -> int:
     check("布局里没有残留的旧按钮", len(live) == len(cfg.quick_items),
           f"{len(live)} vs {len(cfg.quick_items)}")
 
-    # 删除按钮存在且位置紧挨添加按钮
-    check("有删除按钮", hasattr(browser, "btn_del_app"))
-    add_idx = browser.apps_row.indexOf(browser.btn_add_app)
-    del_idx = browser.apps_row.indexOf(browser.btn_del_app)
-    check("删除按钮紧挨在添加按钮右侧", del_idx == add_idx + 1,
-          f"添加@{add_idx} 删除@{del_idx}")
+    # ---- 增删已合并成唯一的「管理」控件 ----
+    check("收纳面板有唯一的「管理」控件", hasattr(browser, "btn_manage"))
+    check("原来的「＋添加 / －删除」两个控件已删除",
+          not hasattr(browser, "btn_add_app")
+          and not hasattr(browser, "btn_del_app"))
+    manage_idx = browser.apps_row.indexOf(browser.btn_manage)
+    check("「管理」控件排在常用软件之后、弹性占位之前",
+          manage_idx == len(cfg.quick_items),
+          f"管理@{manage_idx} 常用{len(cfg.quick_items)} "
+          f"行内共{browser.apps_row.count()}项")
+    check("「管理」控件始终可用（删空也能进去加回来）",
+          browser.btn_manage.isEnabled())
 
-    # 删空后删除按钮应变灰
+    # ---- 管理模式：常用项左上角减号、非常用项右上角加号 ----
+    # 面板显示的是**收纳目录**里的东西；前面的应急还原把文件都还回桌面了，
+    # 所以这里先收一次，保证卡片区真的有内容。
+    if not browser._tiles:
+        nest.take_from_desktop(cfg.desktop)
+        tray.refresh()
+        deadline = time.time() + 25
+        while (tray._scan is not None and tray._scan.isRunning()
+               and time.time() < deadline):
+            app.processEvents()
+            time.sleep(0.05)
+        pump(1)
+    check("管理模式断言的前置：面板里有卡片", bool(browser._tiles),
+          str(len(browser._tiles)))
+
+    browser.set_manage_mode(True)
+    pump(0.4)
+    quick_badges = [b.badge for b in browser._app_buttons]
+    check("管理模式：每张常用卡片都长出了角标",
+          bool(quick_badges) and all(b is not None for b in quick_badges),
+          str(quick_badges))
+    check("管理模式：常用软件的角标是左上角「－」",
+          bool(quick_badges) and all(
+              b is not None and b.text() == "－" and b._corner == "top-left"
+              for b in quick_badges),
+          str([(b.text(), b._corner) for b in quick_badges if b is not None]))
+    tile_badges = [t.badge for t in browser._tiles]
+    check("管理模式：每张卡片都有角标",
+          bool(tile_badges) and all(b is not None for b in tile_badges),
+          str(tile_badges))
+    check("管理模式：非常用卡片右上角是「＋」",
+          bool(tile_badges) and all(
+              b is not None and b.text() == "＋" and b._corner == "top-right"
+              for b in tile_badges),
+          str([(b.text(), b._corner) for b in tile_badges if b is not None]))
+    # 注意：这里判 isHidden() 而不是 isVisible()。离屏测试里面板自己没 show()，
+    # isVisible() 会被整条父链拉成 False，根本区分不出"角标有没有被露出来"。
+    # isHidden() 只反映"有没有被显式藏起来"，才是这里要的语义。
+    check("管理模式：角标真的露出来了（不是只建了对象）",
+          all(not b.isHidden() for b in quick_badges if b is not None)
+          and all(not b.isHidden() for b in tile_badges if b is not None),
+          f"常用{[(b.text(), b.isHidden()) for b in quick_badges if b]} "
+          f"卡片{[(b.text(), b.isHidden()) for b in tile_badges if b]}")
+    check("管理模式：管理控件进入选中态", browser.btn_manage.isChecked())
+    check("管理模式：底部提示切成了操作说明",
+          "管理模式" in browser.hint.text(), browser.hint.text())
+
+    browser.set_manage_mode(False)
+    pump(0.3)
+    check("退出管理模式：角标全部收起",
+          all(b.isHidden() for b in quick_badges if b is not None)
+          and all(b.isHidden() for b in tile_badges if b is not None),
+          f"常用{[(b.text(), b.isHidden()) for b in quick_badges if b]} "
+          f"卡片{[(b.text(), b.isHidden()) for b in tile_badges if b]}")
+    check("退出管理模式：管理控件恢复未选中", not browser.btn_manage.isChecked())
+
+    # 删空后「管理」控件不能跟着禁用（否则加不回来）
     while cfg.quick_items:
         cfg.remove_quick(cfg.quick_items[0]["path"])
     browser.rebuild_apps()
     pump(0.3)
-    check("删空后删除按钮自动禁用", not browser.btn_del_app.isEnabled())
+    check("删空后「管理」控件仍可用", browser.btn_manage.isEnabled())
 
     print()
-    print("── BUG2. Dock 侧也有配套的＋/－ ──")
-    check("菜单栏有删除按钮", hasattr(dock, "del_btn"))
-    dock_add = dock.row.indexOf(dock.add_btn)
-    dock_del = dock.row.indexOf(dock.del_btn)
-    check("菜单栏删除按钮紧挨添加按钮", dock_del == dock_add + 1,
-          f"添加@{dock_add} 删除@{dock_del}")
+    print("── BUG2. 菜单栏只剩「桌面整理」入口 + 常用软件 ──")
+    check("菜单栏的 ＋ / － / ⚙ / ✕ 四个控制按钮已全部删除",
+          not any(hasattr(dock, name) for name in
+                  ("add_btn", "del_btn", "settings_btn", "btn_hide_dock")))
+    check("菜单栏主行只剩应用区 + 一个弹性占位",
+          dock.main_row.count() == 2,
+          f"主行共 {dock.main_row.count()} 项")
+    check("主行第 0 项就是「桌面整理」入口所在的应用区",
+          dock.main_row.itemAt(0).widget() is dock.apps_flow)
 
     print()
     print("── BUG3. Dock 只在最大化/全屏时避让 ──")
