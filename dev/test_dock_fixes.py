@@ -182,22 +182,45 @@ def main() -> int:
               and not buttons[0].icon().isNull())
 
     print()
-    print("── 3. 点击后高亮要会自己消失 ──")
+    print("── 3. 选中态：一直留着，直到把它打开 ──")
     target = tray.nest_items[0]
     tray.desktop_browser.select_item(target)
     app.processEvents()
     highlighted_now = sum(1 for t in tray.desktop_browser._tiles if t.selected)
     check("点击后立刻有高亮", highlighted_now == 1, str(highlighted_now))
 
-    # 等定时器（1.2 秒）触发
-    deadline = time.time() + 5
+    # ⚠️ 这里**故意**从"1.2 秒后自动清掉高亮"改成"选中态要留着"。
+    # 右下角那三个按钮（打开 / 加为常用 / 还原到桌面）是照着**当前选中项**
+    # 干活的。以前单击 1.2 秒后就把选中态一起清掉、按钮跟着变灰，
+    # 用户还没来得及把鼠标从卡片挪到按钮上就点不动了——那也是一种
+    # "加为常用点了没反应"。现在高亮只在**把条目打开**之后才消失
+    # （见 `DesktopBrowser._open()`），选中态则由"选别的 / 翻页 / 重建"来换。
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        app.processEvents()
+        time.sleep(0.05)
+    still = sum(1 for t in tray.desktop_browser._tiles if t.selected)
+    check("等 2 秒后高亮仍然在（不然按钮来不及点）", still == 1, f"{still} 个亮着")
+    check("选中状态也还在", tray.desktop_browser._selected is not None)
+
+    print()
+    print("── 3b. 但「打开」之后高亮要自己消失 ──")
+    import engine as engine_mod
+
+    real_launch = engine_mod.launch
+    engine_mod.launch = lambda *a, **k: (True, "")   # 别真的去开程序
+    try:
+        tray.desktop_browser._open(target)
+    finally:
+        engine_mod.launch = real_launch
+    deadline = time.time() + 3.0
     while time.time() < deadline:
         app.processEvents()
         time.sleep(0.05)
         if not any(t.selected for t in tray.desktop_browser._tiles):
             break
     still = sum(1 for t in tray.desktop_browser._tiles if t.selected)
-    check("高亮会自动消失（不再一直亮着）", still == 0, f"还有 {still} 个亮着")
+    check("打开之后高亮自己消失了", still == 0, f"还有 {still} 个亮着")
     check("选中状态也清掉了", tray.desktop_browser._selected is None)
 
     print()

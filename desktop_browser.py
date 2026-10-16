@@ -13,7 +13,7 @@
     │   ▣ 此电脑    ▣ 回收站    📁 资料夹   📄 报告.docx …   │   ← 分页网格
     │   此电脑      回收站      资料夹      报告.docx        │      图标 + 下方名称
     ├──────────────────────────────────────────────────────┤
-    │  ⏮ ‹ 1/2 › ⏭  共 38 项    [打开][加为常用][还原到桌面] │
+    │  ⏮ ‹ 1/2 › ⏭  共 38 项   [打开][加为常用][还原到桌面] │
     └──────────────────────────────────────────────────────┘
 
 * **图标 + 下方名称**的显示方式
@@ -21,6 +21,10 @@
 * 实时模糊搜索，结果自动收拢
 * 文件夹整体显示，双击在资源管理器里打开
 * 系统位置（此电脑 / 回收站）也在这里，双击直接打开
+
+底部那三个按钮是**跟着选中项变的**：选中一个还没加过常用的，中间那个写
+「加为常用」；选中一个已经在常用里的，它就变成「移出常用」。
+右键单个条目还能「删除（移到回收站）」——进回收站、可还原，不是永久删除。
 
 外观：**贴底上滑的磨砂玻璃浮层**
 --------------------------------
@@ -45,8 +49,10 @@ from qt_compat import (
     QVBoxLayout, QWidget, Qt, QTimer, Signal,
 )
 
+import config
 import engine
 import nest
+import recycle
 import theme as theme_mod
 from textutil import fuzzy_match
 from widgets import (GlassCardMixin, IconLoader, PLACEHOLDER_COLORS, app_icon,
@@ -419,7 +425,9 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         self._search_timer.setInterval(120)
         self._search_timer.timeout.connect(self._rebuild)
 
-        # 单击高亮后自动取消（1.2 秒），避免界面上一直留着一块亮色
+        # 把条目**打开**之后，延迟一小会儿把高亮清掉（不是"单击就清"）。
+        # 详见 `select_item()` 的说明：选中态要一直留着，右下角那几个按钮
+        # 才有得点。
         self._highlight_timer = QTimer(self)
         self._highlight_timer.setSingleShot(True)
         self._highlight_timer.setInterval(1200)
@@ -559,13 +567,25 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         foot.addWidget(self.hint)
         foot.addStretch(1)
 
+        # ⚠️ `clicked` 是 `clicked(bool checked = False)`——它会**真的**把这个
+        # bool 传进槽函数。`open_selected(self)` 只吃 `self`，PyQt 会按形参
+        # 个数截断，所以它没事；但下面两个槽带默认参数（`item=None`），
+        # PyQt 会认为"它还能再收一个"，于是把 `False` 当成 `item` 塞进去
+        # → `False.path` / `False.name` → AttributeError。
+        #
+        # 而 PyQt6 里**槽函数里逃出去的异常会直接 abort 整个进程**：
+        # 没有 traceback、没有报错框，界面就是"点了完全没反应"。
+        # 这就是"右下角的加为常用控件无法正常使用"的真正原因。
+        # 所以这里统一用 lambda 把那个 bool 吃掉，不让它进到业务方法里。
         self.btn_open = QPushButton("打开")
         self.btn_open.setObjectName("Soft")
-        self.btn_open.clicked.connect(self.open_selected)
+        self.btn_open.clicked.connect(lambda _checked=False: self.open_selected())
+        # 文案由 `_update_buttons()` 按"选中项是不是常用"动态改，
+        # 所以这里只给个初始值（需求：不要写死"加为常用"）。
         self.btn_add = QPushButton("加为常用")
-        self.btn_add.clicked.connect(self.add_selected_to_apps)
+        self.btn_add.clicked.connect(lambda _checked=False: self.toggle_selected_quick())
         self.btn_restore = QPushButton("还原到桌面")
-        self.btn_restore.clicked.connect(self.restore_selected)
+        self.btn_restore.clicked.connect(lambda _checked=False: self.restore_selected())
         for button in (self.btn_open, self.btn_add, self.btn_restore):
             foot.addWidget(button)
         root.addWidget(self.footer)
@@ -905,6 +925,8 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         action_reveal = menu.addAction("打开文件所在位置")
         menu.addSeparator()
         action_remove = menu.addAction("从常用启动移除")
+        menu.addSeparator()
+        action_delete = menu.addAction("删除文件（移到回收站）")
         chosen = popup_menu(menu, pos)
         if chosen is None:
             return
@@ -914,6 +936,17 @@ class DesktopBrowser(GlassCardMixin, QWidget):
             engine.open_in_explorer(button.path)
         elif chosen is action_remove:
             self.remove_quick_path(button.path)
+        elif chosen is action_delete:
+            # 常用项记的是"上次它在的位置"，程序刚启动时本体可能还在桌面、
+            # 收纳目录里那份不存在（反之亦然）。所以删除前先用孪生路径
+            # 把"真正在的那个文件"找出来，不然会对着一份不存在的路径删。
+            real = nest.icon_source(button.path, self.cfg.desktop)
+            if real is None:
+                QMessageBox.information(
+                    self, "不能删除",
+                    f"「{button.app_name}」\n\n文件已经不在原来的位置了。")
+            else:
+                self.delete_path(real, button.app_name)
 
     def _show_add_menu(self, anchor: "QWidget | None" = None) -> None:
         """「从文件添加常用软件」的入口。
@@ -1037,6 +1070,16 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         if not self._manage_mode:
             # 管理模式下那句"点角上的 ＋ / －"要留着，不能被统计信息顶掉
             self._refresh_hint()
+
+        # 重建之后把选中态"重新认领"回来。
+        # 卡片都是新造的，`_selected` 还指着上一批那个对象；不重认的话
+        # 高亮会消失，而按钮却还按老对象亮着，两边对不上。
+        # 认领失败（条目被删了 / 翻到别的页了）就清掉选中态。
+        if self._selected is not None:
+            self._selected = next(
+                (t.item for t in self._tiles
+                 if t.item is self._selected
+                 or str(t.item.path) == str(self._selected.path)), None)
         self._update_buttons()
 
     def _on_icon_ready(self, key: str, icon) -> None:
@@ -1051,19 +1094,31 @@ class DesktopBrowser(GlassCardMixin, QWidget):
     # 选中 / 打开
     # ------------------------------------------------------------------
     def select_item(self, item: "engine.RepoItem", *, auto_clear: bool = True) -> None:
-        """选中一个条目。
+        """选中一个条目（高亮 + 让右下角那一排按钮跟上）。
 
-        单击会高亮，但高亮**不等同于"选中状态要一直留着"**：
-        点开程序之后高亮应该自己消失，否则界面上总有一块亮着，
-        看起来像没点成功。所以这里起一个短定时器自动取消高亮。
-        键盘操作 / 需要保持选中时传 auto_clear=False。
+        ⚠️ 这里**不再**"单击后 1.2 秒自动取消高亮"了。
+        右下角的「打开 / 加为常用 / 还原到桌面」是照着"当前选中项"干活的，
+        高亮一闪就没的话，用户还没来得及把鼠标挪到按钮上，按钮就已经灰了
+        ——那也是一种"加为常用点了没反应"。所以选中态改成**一直留着**，
+        直到下面任意一件事发生：
+
+        * 选了别的条目；
+        * 翻页 / 搜索 / 刷新（列表重建，原来的条目可能已经不在这一页了）；
+        * 把它**打开**了（见 `_open`，那时高亮自己消失）；
+        * 按 Esc（`clear_selection`）。
+
+        `auto_clear` 参数保留只是为了兼容老调用方（右键菜单会传 False），
+        现在它只影响"要不要重启那个延迟清除的定时器"。
         """
         self._selected = item
         for tile in self._tiles:
             tile.set_selected(tile.item is item)
         self._update_buttons()
-        if auto_clear:
-            self._highlight_timer.start()
+        self._highlight_timer.stop()
+        if not auto_clear:
+            return
+        # 保持选中，但给一个"这一下点到了"的视觉反馈窗口；
+        # 真正的清除交给 `_open`（打开之后才该消失）。
 
     def clear_selection(self) -> None:
         """取消高亮与选中态。"""
@@ -1074,10 +1129,31 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         self._update_buttons()
 
     def _update_buttons(self) -> None:
-        has = self._selected is not None
+        """让底部那一排按钮跟上"当前选中了什么"。
+
+        这里最关键的是 `btn_add`：它**不是一个固定的"加为常用"**，而是
+        一个开关——选中的东西已经是常用软件，它就该写"移出常用"。
+        （需求原话："不应该写死是加为常用，应该是根据选中软件后判断
+        是否是常用，如果不是的话才是加为常用，是的话则是移出常用"。）
+        """
+        target = self._selected
+        has = target is not None
         self.btn_open.setEnabled(has)
-        self.btn_add.setEnabled(has)
         self.btn_restore.setEnabled(has)
+        self.btn_add.setEnabled(has)
+
+        if not has:
+            self.btn_add.setText("加为常用")
+            self.btn_add.setToolTip("先在下面选中一个条目")
+            return
+
+        if self.cfg.is_quick(target.path):
+            self.btn_add.setText("移出常用")
+            self.btn_add.setToolTip(
+                f"把「{target.name}」从常用启动里移除\n（只移除这一排快捷方式，不动文件）")
+        else:
+            self.btn_add.setText("加为常用")
+            self.btn_add.setToolTip(f"把「{target.name}」加到常用启动")
 
     def open_selected(self) -> None:
         if self._selected is not None:
@@ -1094,12 +1170,32 @@ class DesktopBrowser(GlassCardMixin, QWidget):
             ok, reason = engine.launch(item.path)
         if not ok:
             QMessageBox.warning(self, "打不开", f"{item.name}\n\n{reason}")
+            return
+        # 打开之后高亮就该自己消失——否则界面上总有一块亮着，像没点成功。
+        # （原来这条逻辑挂在"单击选中"上，1.2 秒就把选中态一起清掉了，
+        #   右下角那几个按钮跟着灰掉，根本来不及点。现在挂在"打开"上。）
+        self._highlight_timer.start()
+
+    def toggle_selected_quick(self) -> None:
+        """右下角那个按钮：按"选中项是不是常用"决定加还是移。
+
+        需求：「不应该写死是加为常用，应该根据选中软件判断是否是常用，
+        如果不是的话才是加为常用，是的话则是移出常用」。
+        """
+        target = self._selected
+        if target is None:
+            self.hint.setText("先在下面选中一个条目")
+            return
+        if self.cfg.is_quick(target.path):
+            self.remove_quick_path(target.path)
+        else:
+            self.add_item_to_apps(target)
 
     def add_selected_to_apps(self, item: "engine.RepoItem | None" = None) -> None:
         """把条目加进常用启动。
 
         `item` 显式给定时用它，不给才退回当前选中项。右键菜单一定要显式给
-        ——菜单是模态的，打开期间高亮定时器会把 `_selected` 清掉，
+        ——菜单是模态的，打开期间 `_selected` 可能已经被清掉，
         光靠 `self._selected` 会出现"点了没反应，得再点一次"。
         """
         target = item if item is not None else self._selected
@@ -1125,6 +1221,74 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         else:
             QMessageBox.warning(self, "还原失败", f"{item.name}\n\n{reason}")
 
+    # ------------------------------------------------------------------
+    # 删除（右键 → 移到回收站）
+    # ------------------------------------------------------------------
+    def delete_item(self, item: "engine.RepoItem") -> bool:
+        """把**指定条目**移到回收站。右键菜单走这里。
+
+        参数显式传进来（理由和 `add_selected_to_apps` 一样：菜单是模态的，
+        打开期间 `_selected` 可能已经变了）。
+        """
+        return self.delete_path(item.path, item.name)
+
+    def delete_path(self, path: Path, name: str = "") -> bool:
+        """把一个路径移到回收站（网格卡片和"常用那一排"共用这一条路）。
+
+        ⚠️ 这是整个程序里**唯一**会让文件从原位置消失的操作，所以：
+
+        * 只在用户右键 →「删除（移到回收站）」时才会被调用；
+        * 弹确认框，默认按钮是「否」（回车不会误删）；
+        * 真正动手的是 `recycle.recycle()`，走 Shell 的 `FOF_ALLOWUNDO`
+          ——进回收站，不是永久删除，随时能还原；
+        * `recycle.guard()` 会把系统项 / 盘符根 / 收纳目录本体挡在外面。
+        """
+        path = Path(path)
+        label = name or path.name or str(path)
+
+        allowed, why = recycle.guard(path)
+        if not allowed:
+            QMessageBox.information(self, "不能删除", f"「{label}」\n\n{why}")
+            return False
+
+        if QMessageBox.question(
+                self, "删除到回收站",
+                f"把「{label}」移到回收站？\n\n"
+                "· 文件不会真的消失，随时可以从回收站还原\n"
+                "· 如果它已经是常用软件，会同时从常用启动里移除",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return False
+
+        ok, reason = recycle.recycle(path)
+        if not ok:
+            QMessageBox.warning(self, "删除失败", f"{label}\n\n{reason}")
+            return False
+
+        # 删掉了就别再把它留在"常用软件"里——否则菜单栏上会挂一个死链，
+        # 点一下只会弹"打不开"。
+        was_quick = self.cfg.is_quick(path)
+        if was_quick:
+            self.cfg.remove_quick(path)
+        # 来源清单里那条也要清掉：不清的话，将来桌面上再出现一个同名文件
+        # 会被误当成"从公共桌面收进来的"，还原时送错地方。
+        try:
+            nest.forget_source(path.name)
+        except Exception:
+            pass
+
+        if self._selected is not None and Path(self._selected.path) == path:
+            self._highlight_timer.stop()
+            self._selected = None
+        # refresh_from_disk() 内部会重建"常用那一排"和网格
+        self.refresh_from_disk()
+        if was_quick:
+            self.request_quick_changed.emit()   # 同步菜单栏 / Dock / 托盘菜单
+        self.request_refresh.emit()             # 让主程序重新扫一遍
+        config.log(f"删除到回收站：{path}")
+        self.hint.setText(f"已把「{label}」移到回收站（可还原）")
+        return True
+
     def clear_search(self) -> None:
         self.search.clear()
         self._rebuild()
@@ -1135,8 +1299,7 @@ class DesktopBrowser(GlassCardMixin, QWidget):
     # ------------------------------------------------------------------
     def _show_tile_menu(self, item: "engine.RepoItem", pos) -> None:
         # ⚠️ `auto_clear=False` 是必须的。菜单是**模态**的，会跑一个嵌套事件
-        # 循环，那个"单击后 1.2 秒自动取消高亮"的定时器照常触发、
-        # 把 `self._selected` 清成 None。菜单里的动作若依赖 `_selected`
+        # 循环；选中态要是被那个延迟清除的定时器清掉，菜单里的动作就没目标了
         # （老的"加为常用启动"就是），用户就得"点好几次才成功一次"。
         # 现在既关掉自动清除，动作也改成显式传 item，双保险。
         self.select_item(item, auto_clear=False)
@@ -1152,6 +1315,10 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         action_restore = menu.addAction("还原到桌面")
         action_copy = menu.addAction("复制完整路径")
         action_size = menu.addAction("查看文件夹大小") if item.is_dir else None
+        # 删除放在最后一行，并且和上面隔开——它是这一串里唯一"会动数据"的动作，
+        # 别让手一滑就点到。
+        menu.addSeparator()
+        action_delete = None if is_system else menu.addAction("删除（移到回收站）")
 
         chosen = popup_menu(menu, pos)
         if chosen is None:
@@ -1176,6 +1343,8 @@ class DesktopBrowser(GlassCardMixin, QWidget):
             QMessageBox.information(self, item.name,
                                     f"「{item.name}」里大约有：\n\n文件 {files} 个\n"
                                     f"子文件夹 {folders} 个")
+        elif action_delete is not None and chosen is action_delete:
+            self.delete_item(item)
 
     def _show_more_menu(self) -> None:
         menu = QMenu(self)
