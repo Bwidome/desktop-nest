@@ -468,8 +468,16 @@ QWidget:disabled {{
 }}
 
 /* ---------- 2. 文字层级 ---------- */
+/* 三级：标题（#Title）> 分节标签（#SectionLabel）> 提示（#Hint）。
+   分节标签专门用来给"常用启动"这类区块起名——比正文小一号、颜色更淡，
+   既点明了这块是什么，又不会和卡片名字抢注意力。 */
 #Title {{ font-size: {F['lg']}pt; font-weight: {W['semibold']}; }}
 #Subtitle, #Hint {{ color: {c['text_faint']}; font-size: {F['sm']}pt; }}
+#SectionLabel {{
+    color: {c['text_faint']};
+    font-size: {F['xs']}pt;
+    font-weight: {W['semibold']};
+}}
 #SectionTitle {{ font-size: {F['base']}pt; font-weight: {W['semibold']}; }}
 #Muted {{ color: {c['text_sub']}; }}
 #StatValue {{ font-size: {F['xl']}pt; font-weight: {W['semibold']}; color: {c['text']}; }}
@@ -526,6 +534,17 @@ QPushButton#Danger {{
 QPushButton#Danger:hover {{ background: {c['danger']}; border-color: {c['danger']}; color: #FFFFFF; }}
 QPushButton#Danger:disabled {{ background: {c['surface_alt']}; border-color: {c['border']}; color: {c['text_faint']}; }}
 
+/* 提醒款（暖色）：用于"还原到桌面"这类**会改变现状、但不算危险**的操作。
+   比 #Primary 安静、比普通描边按钮醒目——正好卡在中间那一档。 */
+QPushButton#Warning {{
+    background: {c['warn_soft']};
+    border: 1px solid {c['warn_soft']};
+    color: {c['warn']};
+    font-weight: {W['semibold']};
+}}
+QPushButton#Warning:hover {{ background: {c['warn']}; border-color: {c['warn']}; color: #FFFFFF; }}
+QPushButton#Warning:disabled {{ background: {c['surface_alt']}; border-color: {c['border']}; color: {c['text_faint']}; }}
+
 QPushButton#Soft {{
     background: {c['accent_soft']};
     border: 1px solid {c['accent_soft']};
@@ -578,10 +597,24 @@ QLineEdit:disabled, QTextEdit:disabled {{
     background: {c['surface_alt']};
     border-color: {c['border']};
 }}
+/* 搜索框：左侧的放大镜由 `QLineEdit.addAction(LeadingPosition)` 画在框内，
+   Qt 会自己把文字让开，所以这里**不能**再写死 `padding-left`——
+   写了就会在图标和文字之间多留一段谁也看不见的空档。 */
 QLineEdit#Search {{
     background: {c['surface']};
-    padding-left: 30px;
     border-radius: {R['lg'] + 1}px;
+}}
+/* 聚焦：描边换成主色 + 一层很淡的主色底。
+   ⚠️ 只改颜色，不改 border 宽度 / padding —— 聚焦时尺寸一点都不变，
+   下面的网格不会跟着抖一下。 */
+QLineEdit#Search:focus {{
+    border-color: {c['accent']};
+    background: {c['accent_soft']};
+}}
+QLineEdit#Search:disabled {{
+    color: {c['text_faint']};
+    background: {c['surface_alt']};
+    border-color: {c['border']};
 }}
 
 QComboBox {{
@@ -810,6 +843,38 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
     border-bottom-left-radius: {R['popup_inner']}px;
     border-bottom-right-radius: {R['popup_inner']}px;
 }}
+/* ---- 顶栏图标钮（刷新 / 菜单 / 关闭）：次级操作，常态安静，悬停才浮出来 ----
+   ⚠️ 这里必须用**子选择器** `>`，不能写成 `#Toolbar QToolButton`（后代选择器）。
+   后者的特异性 (1,0,1) 高于 `#AppManage` (1,0,0)，会把"管理"控件的虚线描边
+   整条盖掉；而"管理"控件挂在 apps_host 下面，不是 #Toolbar 的直接子控件，
+   用 `>` 就天然把它排除在外了。 */
+#Toolbar > QToolButton {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: {R['md']}px;
+    padding: 4px 10px;
+    color: {c['text_sub']};
+    font-size: {F['sm']}pt;
+}}
+#Toolbar > QToolButton:hover {{
+    background: {c['hover']};
+    border-color: {c['border']};
+    color: {c['text']};
+}}
+#Toolbar > QToolButton:pressed {{ background: {c['pressed']}; }}
+#Toolbar > QToolButton:disabled {{ color: {c['text_faint']}; background: transparent; }}
+/* 关闭钮：悬停给一点"要关掉了"的提示色，和主面板那个关闭按钮呼应。
+   写成复合选择器是为了让它的特异性压过上面那条通用规则。 */
+#Toolbar > QToolButton#ToolbarClose:hover {{
+    background: {c['danger']};
+    border-color: {c['danger']};
+    color: #FFFFFF;
+}}
+#Toolbar > QToolButton#ToolbarClose:pressed {{
+    background: {c['danger']};
+    border-color: {c['danger']};
+    color: #FFFFFF;
+}}
 
 /* ---------- 15. 底部菜单栏（Dock）---------- */
 /* 需求：菜单栏做成**纯透明**——只留「桌面整理」控件和常用软件的图标浮在桌面上，
@@ -912,7 +977,11 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
     border: 1px solid {c['accent']};
     color: {c['accent']};
 }}
-#TileName {{ font-size: {F['sm']}pt; }}
+/* 卡片名称：最多两行、超出省略号（省略逻辑在 widgets.ElidedLabel 里，
+   因为 QSS 管不了"折行 + 末尾省略"这件事）。
+   字号比正文小一档——网格里一屏几十个名字，跟着正文大小会太吵。 */
+#TileName {{ font-size: {F['sm']}pt; color: {c['text']}; }}
+#FileTile[selected="true"] #TileName {{ color: {c['accent']}; }}
 
 /* ---------- 17. 管理模式下卡片角上的「＋ / －」 ---------- */
 /* 20×20 的小圆钮。给足对比度：它压在图标上，底色太淡就分不清是按钮还是图标的一部分。 */
@@ -937,13 +1006,22 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
 }}
 
 /* ---------- 18. 文件网格卡片 ---------- */
+/* 选中 / 悬停都由**动态属性**驱动（`setProperty("selected", True)` +
+   `style().unpolish/polish`），不再往卡片上贴内联样式表——
+   内联样式表的特异性高于全局规则，会把 `#FileTile:hover` 整条盖掉，
+   于是"卡片悬停没反应"。 */
 #FileTile {{
     background: transparent;
     border: 1px solid transparent;
     border-radius: {R['lg']}px;
 }}
+/* 悬停只换一层很淡的底，**不动边框、不动尺寸** —— 整片网格不会跟着跳 */
 #FileTile:hover {{
     background: {c['hover']};
+}}
+#FileTile[selected="true"] {{
+    background: {c['accent_soft']};
+    border-color: {c['accent']};
 }}
 
 /* ---------- 19. 提示条 ---------- */

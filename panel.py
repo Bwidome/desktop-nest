@@ -238,14 +238,24 @@ class MainPanel(GlassCardMixin, QWidget):
         actions.addStretch(1)
 
         self.btn_take = QPushButton("收纳桌面")
+        self.btn_take.setToolTip("把桌面上的东西收进收纳目录（只移动，不删除）")
         self.btn_take.clicked.connect(self.request_take.emit)
         actions.addWidget(self.btn_take)
 
         self.btn_restore = QPushButton("还原桌面")
         self.btn_restore.setObjectName("Primary")
+        self.btn_restore.setToolTip("把收纳目录里的东西全部放回桌面（只移动，不删除）")
         self.btn_restore.clicked.connect(self.request_restore.emit)
         actions.addWidget(self.btn_restore)
         root.addLayout(actions)
+
+        # 需求：按钮跟着状态灰掉——"桌面待收纳 = 0"时「收纳桌面」不可点，
+        # "收纳项目 = 0"时「还原桌面」不可点。
+        # 这里先把初始态设成"没有东西可动"，等 `refresh_cards()` 拿到真实
+        # 数量再打开；否则面板刚弹出来那一瞬间两个按钮都是亮的，
+        # 点下去只会得到一句"没有可收纳的项"。
+        self.btn_take.setEnabled(False)
+        self.btn_restore.setEnabled(False)
 
     def _build_items_tab(self) -> QWidget:
         widget = QWidget()

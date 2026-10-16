@@ -44,9 +44,10 @@ from pathlib import Path
 
 from qt_compat import (
     popup_menu,
-    QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu,
-    QMessageBox, QPoint, QPushButton, QScrollArea, QSize, QToolButton,
-    QVBoxLayout, QWidget, Qt, QTimer, Signal,
+    QApplication, QEvent, QFontMetrics, QFrame, QGridLayout, QHBoxLayout,
+    QLabel, QLineEdit, QMenu, QMessageBox, QPoint, QPropertyAnimation,
+    QPushButton, QScrollArea, QSize, QToolButton, QVBoxLayout, QWidget, Qt,
+    QTimer, Signal,
 )
 
 import config
@@ -55,17 +56,25 @@ import nest
 import recycle
 import theme as theme_mod
 from textutil import fuzzy_match
-from widgets import (FALLBACK_TILE_COLOR, GlassCardMixin, IconLoader,
-                     PLACEHOLDER_COLORS, app_icon, icon_hint_for, letter_pixmap,
-                     multi_pick, pixmap_for)
+from widgets import (ElidedLabel, FALLBACK_TILE_COLOR, GlassCardMixin,
+                     IconLoader, PLACEHOLDER_COLORS, app_icon, icon_hint_for,
+                     letter_pixmap, multi_pick, pixmap_for, search_icon)
 
 GRID_ICON = 40                 # 网格里的图标显示尺寸（原来 48，偏大）
 ICON_REQUEST = 64              # 向 Windows 要更大的图标再缩，清晰得多
-CELL_W = 116
+CELL_W = 116                   # 网格单元格的占位尺寸（卡片 + 四周留白）
 CELL_H = 110
+TILE_W = CELL_W - 4            # 卡片本身：比单元格小一点，但比原来(+8)更满，
+TILE_H = CELL_H - 4            # 点击区域跟着变大（需求：点击区域扩大）
 DEFAULT_PER_PAGE = 28          # 7 列 × 4 行
 PAGE_SIZE_CHOICES = [14, 21, 28, 35, 42]
-APP_ICON = 34
+APP_ICON = 36                  # 常用启动的图标尺寸（原来 34，略放大一档）
+APP_BUTTON_W = 80              # 常用启动按钮的尺寸（跟着图标一起放宽）
+APP_BUTTON_H = 70
+# 悬停时图标放大的比例。需求：轻微 scale，**不要超过 1.15**。
+APP_HOVER_SCALE = 1.12
+# 卡片名称最多显示几行（超出走省略号，见 widgets.ElidedLabel）
+NAME_LINES = 2
 # 从网格卡片拖到「常用软件」那一排时携带的 MIME 类型（需求5）
 DND_MIME = "application/x-desktop-nest-item"
 # 贴底时默认给底部菜单栏让开的高度。主程序会用 Dock 的**真实高度**覆盖它
@@ -116,7 +125,12 @@ class ManageBadge(QToolButton):
 
 
 class ItemTile(QFrame):
-    """网格里的一个卡片：**图标在上、名称在下**。"""
+    """网格里的一个卡片：**图标在上、名称在下**。
+
+    选中 / 悬停都靠**动态属性** + 全局 QSS 表达，不再往卡片上贴内联样式表。
+    内联样式表的特异性高于全局规则，会把 `#FileTile:hover` 整条盖掉——
+    那就是"卡片悬停没有任何反应"的根因。
+    """
 
     activated = Signal(object)
     double_clicked = Signal(object)
@@ -136,8 +150,10 @@ class ItemTile(QFrame):
         # 管理模式下贴在角上的「＋ / －」；由面板在需要时挂上来（见 _attach_badge）
         self.badge: "ManageBadge | None" = None
         self.setObjectName("FileTile")
-        self.setFixedSize(CELL_W - 8, CELL_H - 8)
+        self.setFixedSize(TILE_W, TILE_H)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        # 选中态交给样式表（`#FileTile[selected="true"]`），初始为未选中
+        self.setProperty("selected", False)
 
         # 长按计时器：到点后允许把手势升级成"拖到常用软件那一排"（需求5）
         self._press_pos: "QPoint | None" = None
@@ -150,8 +166,8 @@ class ItemTile(QFrame):
         display = engine.display_name(item.name, item.is_dir, show_extensions)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 9, 6, 7)
-        layout.setSpacing(6)
+        layout.setContentsMargins(4, 8, 4, 6)
+        layout.setSpacing(5)
 
         self.icon_label = QLabel()
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -162,19 +178,22 @@ class ItemTile(QFrame):
                           GRID_ICON))
         layout.addWidget(self.icon_label)
 
-        self.name_label = QLabel(display)
+        # 名称最多两行、超出省略号。`text()` 仍然是**完整**名字——
+        # 别的代码和自检都按它比对，只有"怎么画"被改掉了。
+        self.name_label = ElidedLabel(display, NAME_LINES)
         self.name_label.setObjectName("TileName")
         self.name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter |
                                      Qt.AlignmentFlag.AlignTop)
-        self.name_label.setWordWrap(True)
-        self.name_label.setFixedHeight(32)
         layout.addWidget(self.name_label)
         layout.addStretch(1)
         self._apply_style()
 
     def set_icon(self, icon) -> None:
         if icon is not None and not icon.isNull():
-            self.icon_label.setPixmap(pixmap_for(icon, GRID_ICON, self.icon_label))
+            # square=True：把各种长宽比的图标统一放进方形画布，
+            # 一屏看下来"大小一致"（否则扁文件夹会显得比竖文档大一圈）。
+            self.icon_label.setPixmap(
+                pixmap_for(icon, GRID_ICON, self.icon_label, square=True))
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -187,15 +206,23 @@ class ItemTile(QFrame):
             self._apply_style()
 
     def _apply_style(self) -> None:
+        """把"选中"这件事同步给样式表。
+
+        做法：改动态属性 → unpolish/polish 让 Qt 重新匹配选择器。
+        **不要**改成 `setStyleSheet(...)`：内联样式表会盖掉全局的
+        `#FileTile:hover`，卡片就再也不响应悬停了。
+        """
         c = self.p
-        bg = c["accent_soft"] if self.selected else "transparent"
-        border = c["accent"] if self.selected else "transparent"
-        # 圆角走 Design Token，别在这里另写一个数字
-        self.setStyleSheet(
-            f"#FileTile {{ background: {bg}; border: 1px solid {border};"
-            f" border-radius: {theme_mod.RADIUS['lg']}px; }}")
-        self.name_label.setStyleSheet(
-            f"color: {c['accent'] if self.selected else c['text']};")
+        self.setProperty("selected", bool(self.selected))
+        style = self.style()
+        for widget in (self, self.name_label):
+            style.unpolish(widget)
+            style.polish(widget)
+        # 名称颜色同时显式喂一份给 ElidedLabel：它自己画字，
+        # 不依赖样式表把颜色传到 palette 的时机。
+        self.name_label.set_text_color(
+            c["accent"] if self.selected else c["text"])
+        self.update()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -336,7 +363,12 @@ class QuickDropHost(QWidget):
 
 
 class AppButton(QToolButton):
-    """顶部"常用启动"里的一个小快捷方式：图标 + 名称。"""
+    """顶部"常用启动"里的一个小快捷方式：图标 + 名称。
+
+    悬停时图标**轻微放大**（`APP_HOVER_SCALE`，需求要求不超过 1.15）。
+    QSS 没有 `transform`，所以这里用 `QPropertyAnimation` 动 `iconSize`——
+    按钮本身是固定尺寸的，变大的只有图标，整排不会重新排版、不会抖。
+    """
 
     activated = Signal(object)
     context_requested = Signal(object, object)
@@ -351,24 +383,63 @@ class AppButton(QToolButton):
         self.setObjectName("AppButton")
         self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.setIconSize(QSize(APP_ICON, APP_ICON))
-        self.setFixedSize(78, 66)
+        self.setFixedSize(APP_BUTTON_W, APP_BUTTON_H)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        # 显示名统一按"真实文件名 + 后缀开关"算，配置里存的 name 可能是不带后缀的
+        # 显示名统一按"真实文件名 + 后缀开关"算，配置里存的 name 可能是不带后缀的。
+        # 完整名字留在 `display_name` / tooltip 里，按钮上那行是省略过的。
         display = engine.display_name(path.name or name, False, show_extensions)
-        self.setToolTip(f"{display}\n{path}")
+        self.display_name = display
+        self.setToolTip(f"{display}\n{path}\n\n单击打开 · 右键更多操作")
         self.setText(self._elide(display))
+        # 悬停放大用的动画；起点在每次触发时现取，来回移动不会跳。
+        self._icon_anim = QPropertyAnimation(self, b"iconSize", self)
+        self._icon_anim.setDuration(theme_mod.DURATION["fast"])
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(
             lambda pos: self.context_requested.emit(self, self.mapToGlobal(pos)))
 
-    @staticmethod
-    def _elide(text: str, limit: int = 5) -> str:
-        return text if len(text) <= limit else text[: limit - 1] + "…"
+    def _elide(self, text: str) -> str:
+        """按**字体实际宽度**把名字省略到放得下。
+
+        原来是"最多 5 个字"硬切，中英文混排时切得莫名其妙
+        （"Visual Studio Code" 只剩 "Visu…"，而 "新建文本文档.txt" 明明放得下也被切掉）。
+        """
+        metrics = QFontMetrics(self.font())
+        width = max(24, self.width() - 10)
+        return metrics.elidedText(text, Qt.TextElideMode.ElideRight, width)
+
+    def _animate_icon(self, scale: float) -> None:
+        size = max(1, int(round(APP_ICON * scale)))
+        target = QSize(size, size)
+        anim = getattr(self, "_icon_anim", None)
+        if anim is None:
+            self.setIconSize(target)
+            return
+        anim.stop()
+        anim.setStartValue(self.iconSize())
+        anim.setEndValue(target)
+        anim.start()
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self._animate_icon(APP_HOVER_SCALE)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._animate_icon(1.0)
+        super().leaveEvent(event)
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        super().changeEvent(event)
+        # 样式表把字号定下来是在构造**之后**，所以字体一变就重算一次省略，
+        # 免得一直按构造时的默认字号截断。
+        if event.type() == QEvent.Type.FontChange:
+            self.setText(self._elide(self.display_name))
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         if self.badge is not None:
             self.badge.place()
+        self.setText(self._elide(self.display_name))
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(
@@ -490,6 +561,7 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         self.btn_more.clicked.connect(self._show_more_menu)
 
         self.btn_close = QToolButton()
+        self.btn_close.setObjectName("ToolbarClose")   # 悬停给"要关掉了"的提示色
         self.btn_close.setText("✕")
         self.btn_close.setToolTip("关闭")
         self.btn_close.clicked.connect(self.hide)
@@ -500,23 +572,37 @@ class DesktopBrowser(GlassCardMixin, QWidget):
 
         # 常用启动：图标 + 名称的小快捷方式
         # 这一排同时是"长按拖进来就加为常用"的落点（需求5）
+        #
+        # 前面那行小标题是给"我在哪、哪些是常用启动"用的：没有它，这排图标
+        # 和下面的文件网格长得太像，第一次打开的人分不出哪个是常用软件。
+        self.apps_label = QLabel("常用启动")
+        self.apps_label.setObjectName("SectionLabel")
+        bar.addWidget(self.apps_label)
+
         self.apps_host = QuickDropHost(self.p, self.surface)
         self.apps_host.setObjectName("QuickDropHost")
         self.apps_host.dropped.connect(self._on_quick_dropped)
         self.apps_row = QHBoxLayout(self.apps_host)
         self.apps_row.setContentsMargins(0, 0, 0, 0)
-        self.apps_row.setSpacing(4)
+        self.apps_row.setSpacing(6)
         bar.addWidget(self.apps_host)
 
         search_row = QHBoxLayout()
         search_row.setSpacing(8)
         self.search = QLineEdit()
-        self.search.setPlaceholderText("搜索这里的文件和快捷方式…")
+        self.search.setObjectName("Search")            # QSS 里 #Search 的聚焦规则靠它
+        self.search.setPlaceholderText("搜索文件、文件夹和应用...")
         self.search.setClearButtonEnabled(True)
+        # 放大镜用 addAction 画在框内左侧：Qt 会自己把文字让开，
+        # 所以样式表里**不能**再写死 padding-left（会多留一段看不见的空档）。
+        self._search_action = self.search.addAction(
+            search_icon(self.p["text_faint"]),
+            QLineEdit.ActionPosition.LeadingPosition)
         self.search.textChanged.connect(lambda _: self._search_timer.start())
         search_row.addWidget(self.search, 1)
         self.btn_clear = QToolButton()
         self.btn_clear.setText("清空")
+        self.btn_clear.setToolTip("清空搜索关键词")
         self.btn_clear.clicked.connect(self.clear_search)
         search_row.addWidget(self.btn_clear)
         bar.addLayout(search_row)
@@ -581,14 +667,21 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         # 没有 traceback、没有报错框，界面就是"点了完全没反应"。
         # 这就是"右下角的加为常用控件无法正常使用"的真正原因。
         # 所以这里统一用 lambda 把那个 bool 吃掉，不让它进到业务方法里。
+        # ---- 底部三个按钮的视觉层级（需求：不要三个一样突出）----
+        #   打开        → #Primary（实心主色）：最常用，也是这一排的"主操作"
+        #   加为常用    → 默认描边款（次级）：会改配置，但不改文件
+        #   还原到桌面  → #Warning（暖色提醒款）：会改变现状，得比次级再显眼一点
         self.btn_open = QPushButton("打开")
-        self.btn_open.setObjectName("Soft")
+        self.btn_open.setObjectName("Primary")
+        self.btn_open.setToolTip("打开选中的条目（也可以直接双击卡片）")
         self.btn_open.clicked.connect(lambda _checked=False: self.open_selected())
         # 文案由 `_update_buttons()` 按"选中项是不是常用"动态改，
         # 所以这里只给个初始值（需求：不要写死"加为常用"）。
         self.btn_add = QPushButton("加为常用")
         self.btn_add.clicked.connect(lambda _checked=False: self.toggle_selected_quick())
         self.btn_restore = QPushButton("还原到桌面")
+        self.btn_restore.setObjectName("Warning")
+        self.btn_restore.setToolTip("把选中的条目放回桌面（只移动，不删除）")
         self.btn_restore.clicked.connect(lambda _checked=False: self.restore_selected())
         for button in (self.btn_open, self.btn_add, self.btn_restore):
             foot.addWidget(button)
@@ -602,12 +695,19 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         self.dark = True
         self.p = theme_mod.glass_palette()
         self._restyle()
+        self._refresh_search_icon()
         for tile in self._tiles:
             tile.p = self.p
             tile._apply_style()
         self._rebuild_apps()
         if self._tiles:
             self._render_page()
+
+    def _refresh_search_icon(self) -> None:
+        """放大镜的颜色跟着调色板走（换主题时不用重建整个搜索框）。"""
+        action = getattr(self, "_search_action", None)
+        if action is not None:
+            action.setIcon(search_icon(self.p["text_faint"]))
 
     # ------------------------------------------------------------------
     # 显示文件后缀名
@@ -668,7 +768,7 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         self.btn_manage.setCheckable(True)
         self.btn_manage.setChecked(self._manage_mode)
         self.btn_manage.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_manage.setFixedSize(78, 66)
+        self.btn_manage.setFixedSize(APP_BUTTON_W, APP_BUTTON_H)
         self._sync_manage_button()
         self.btn_manage.clicked.connect(self.toggle_manage_mode)
         self.apps_row.addWidget(self.btn_manage)
@@ -728,8 +828,8 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         cached_icon = self.loader.cached(key)
         if cached_icon is not None:
             setter(cached_icon)
-        # hi_res=True：这一排要显示 APP_ICON(34px) 的图标，
-        # 而 SHGetFileInfoW 顶天只给 32×32，硬拉到 34 就糊了。
+        # hi_res=True：这一排要显示 APP_ICON(36px) 的图标，
+        # 而 SHGetFileInfoW 顶天只给 32×32，硬拉到 36 就糊了。
         # 走 get_icon_best() 拿 256×256 原图再由 Qt 缩下来。
         # hint 传 None：loader 会在取图时按解析出来的那个路径去解析 .lnk 目标。
         self.loader.request(
@@ -1051,13 +1151,14 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         total_cells = ((len(page_items) + columns - 1) // columns) * columns
         for index in range(len(page_items), total_cells):
             spacer = QWidget(self.grid_host)
-            spacer.setFixedSize(CELL_W - 8, CELL_H - 8)
+            spacer.setFixedSize(TILE_W, TILE_H)
             self.grid.addWidget(spacer, index // columns, index % columns)
 
         self.empty_label.setVisible(not page_items)
         if not page_items:
             if self.search.text().strip():
-                self.empty_label.setText("没有匹配的文件或快捷方式")
+                # 需求指定的文案：搜不到东西时说人话，别让人以为面板坏了
+                self.empty_label.setText("未找到匹配项目")
             else:
                 self.empty_label.setText(
                     "这里还是空的\n\n程序启动时会自动把桌面上的东西收进来；\n"

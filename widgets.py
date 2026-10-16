@@ -13,9 +13,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from qt_compat import (
-    QCheckBox, QColor, QDialog, QFont, QHBoxLayout, QIcon, QImage, QLabel,
-    QPainter, QPainterPath, QPalette, QPixmap, QPushButton, QRect,
-    QScrollArea, Qt, QTimer, QVBoxLayout, QWidget, Signal,
+    QCheckBox, QColor, QDialog, QFont, QFontMetrics, QHBoxLayout, QIcon,
+    QImage, QLabel, QPainter, QPainterPath, QPalette, QPen, QPixmap, QPointF,
+    QPushButton, QRect, QScrollArea, QSize, Qt, QTimer, QVBoxLayout, QWidget,
+    Signal,
 )
 
 import acrylic
@@ -116,11 +117,17 @@ def app_icon() -> QIcon:
     return icon
 
 
-def pixmap_for(icon: "QIcon", logical_size: int, widget=None) -> "QPixmap":
+def pixmap_for(icon: "QIcon", logical_size: int, widget=None,
+               square: bool = False) -> "QPixmap":
     """按控件的实际设备像素比取图标，避免高分屏上发虚。
 
     直接 `icon.pixmap(48, 48)` 在 150% 缩放下会被拉大导致模糊；
     这里显式按 devicePixelRatio 请求物理像素，再由 Qt 缩回逻辑尺寸。
+
+    `square=True` 时再补一步：把图标**等比居中放进 size×size 的方形画布**。
+    网格里的图标长宽比五花八门（文件夹是扁的、文档是竖的），
+    各自按原始比例排下来，看上去"有大有小"；统一到同一张方形画布上，
+    视觉尺寸才是齐的（需求：图标大小统一）。
     """
     ratio = 1.0
     try:
@@ -141,7 +148,170 @@ def pixmap_for(icon: "QIcon", logical_size: int, widget=None) -> "QPixmap":
         pixmap.setDevicePixelRatio(ratio)
     except Exception:
         pass
+    if square:
+        pixmap = _square_canvas(pixmap, logical_size, ratio)
     return pixmap
+
+
+def _square_canvas(pixmap: "QPixmap", logical_size: int, ratio: float) -> "QPixmap":
+    """把一张图标等比缩放后居中画进 `logical_size × logical_size` 的透明画布。
+
+    画布按 devicePixelRatio 申请物理像素，再用逻辑坐标作画，所以
+    高分屏上不会因为"先缩到逻辑尺寸、再被系统放大"而糊掉。
+    """
+    try:
+        physical = max(1, int(round(logical_size * ratio)))
+        canvas = QPixmap(physical, physical)
+        canvas.fill(Qt.GlobalColor.transparent)
+        try:
+            canvas.setDevicePixelRatio(ratio)
+        except Exception:
+            pass
+        painter = QPainter(canvas)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        source_w = pixmap.width() / max(ratio, 1e-6)
+        source_h = pixmap.height() / max(ratio, 1e-6)
+        if source_w <= 0 or source_h <= 0:
+            painter.end()
+            return pixmap
+        scale = min(logical_size / source_w, logical_size / source_h)
+        draw_w, draw_h = source_w * scale, source_h * scale
+        left = (logical_size - draw_w) / 2.0
+        top = (logical_size - draw_h) / 2.0
+        painter.drawPixmap(
+            QRect(int(round(left)), int(round(top)),
+                  max(1, int(round(draw_w))), max(1, int(round(draw_h)))),
+            pixmap, QRect(0, 0, pixmap.width(), pixmap.height()))
+        painter.end()
+        return canvas
+    except Exception:
+        return pixmap
+
+
+class ElidedLabel(QLabel):
+    """最多显示 N 行、末尾带省略号的标签。
+
+    为什么不直接用 `QLabel.setWordWrap(True)`：Qt 的自动折行**不画省略号**，
+    名字太长时最后一行会被硬切掉半个字，看起来像渲染坏了。
+
+    为什么不把文本本身截短：`text()` 必须保留**完整**名字——别处拿它当条目名
+    用（自检也按它比对）。所以这里只重写"怎么画"，不碰 `text()` 的内容。
+    """
+
+    def __init__(self, text: str = "", max_lines: int = 2, parent=None):
+        super().__init__(text, parent)
+        self.max_lines = max(1, int(max_lines))
+        self._color: "QColor | None" = None
+        # 让 sizeHint 按多行算，外部给的高度才够放两行
+        self.setWordWrap(True)
+
+    def sizeHint(self):  # noqa: N802
+        """高度按"字体实际行高 × 行数"给，别写死像素。
+
+        写死 32px 在 100% 缩放下正好，在 150% 缩放下会把第二行切掉半截。
+        """
+        metrics = QFontMetrics(self.font())
+        return QSize(80, metrics.height() * self.max_lines)
+
+    # ---- 颜色：优先用调用方显式给的那一份 ----
+    # QSS 的 `color` 会落到 palette 上，但"属性选择器 + 后代选择器"能不能
+    # 稳定地传到子控件，各家 Qt 版本行为不完全一致；这里留一个显式入口，
+    # 面板在切换选中态时直接喂色，不依赖样式表的重算时机。
+    def set_text_color(self, color) -> None:
+        self._color = QColor(color) if color else None
+        self.update()
+
+    def _line_color(self) -> "QColor":
+        if self._color is not None:
+            return self._color
+        return self.palette().color(QPalette.ColorRole.WindowText)
+
+    # ---- 折行 + 省略 ----
+    def _layout_lines(self, metrics: "QFontMetrics", width: int) -> "list[str]":
+        """把文本折成最多 `max_lines` 行；装不下的部分在最后一行省略掉。"""
+        text = " ".join(self.text().split("\n"))
+        if not text or width <= 0:
+            return []
+        lines: "list[str]" = []
+        current = ""
+        pos = 0
+        total = len(text)
+        while pos < total:
+            char = text[pos]
+            if metrics.horizontalAdvance(current + char) <= width:
+                current += char
+                pos += 1
+                continue
+            # 这一行装不下了。还有行数可用就换行，否则就地截断。
+            if len(lines) + 1 >= self.max_lines:
+                break
+            lines.append(current)
+            current = ""
+        else:
+            if current:
+                lines.append(current)
+            return lines
+        # 没装完：最后一行补省略号
+        if len(lines) < self.max_lines:
+            lines.append(self._elide_tail(metrics, current, text[pos:], width))
+        elif lines:
+            lines[-1] = self._elide_tail(metrics, lines[-1], "", width)
+        return lines
+
+    @staticmethod
+    def _elide_tail(metrics: "QFontMetrics", head: str, tail: str,
+                    width: int) -> str:
+        candidate = head + tail
+        elided = metrics.elidedText(candidate, Qt.TextElideMode.ElideRight,
+                                    width)
+        if elided != candidate:
+            return elided
+        # elidedText 认为"放得下"就不加省略号；但我们确实截掉了东西，
+        # 这里手动退到装得下为止再补一个省略号。
+        while candidate and metrics.horizontalAdvance(candidate + "…") > width:
+            candidate = candidate[:-1]
+        return candidate + "…"
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        metrics = QFontMetrics(self.font())
+        rect = self.contentsRect()
+        lines = self._layout_lines(metrics, max(1, rect.width()))
+        painter.setPen(self._line_color())
+        flags = int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        line_height = metrics.height()
+        top = rect.top()
+        for line in lines[: self.max_lines]:
+            painter.drawText(QRect(rect.left(), top, rect.width(), line_height),
+                             flags, line)
+            top += line_height
+        painter.end()
+
+
+def search_icon(color: str, size: int = 15) -> "QIcon":
+    """画一个放大镜，给搜索框左侧用。
+
+    用画的而不是塞一张固定 png：颜色得跟着主题走——玻璃卡片上要浅灰、
+    浅色主题下要深灰，一张写死颜色的图没法两边都合适。
+    """
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor(color))
+    pen.setWidthF(max(1.2, size * 0.11))
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    radius = size * 0.29
+    center_x = center_y = size * 0.42
+    painter.drawEllipse(QPointF(center_x, center_y), radius, radius)
+    offset = radius * 0.70
+    painter.drawLine(QPointF(center_x + offset, center_y + offset),
+                     QPointF(size * 0.86, size * 0.86))
+    painter.end()
+    return QIcon(pixmap)
 
 
 def clear_hover(widget) -> None:

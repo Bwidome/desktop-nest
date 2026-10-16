@@ -99,7 +99,7 @@
 
 | 组件 | 选择器 | 三态 |
 | --- | --- | --- |
-| Button | `QPushButton` + `#Primary` / `#Soft` / `#Danger` / `#Ghost` / `QToolButton` | hover / pressed / **focus** / disabled |
+| Button | `QPushButton` + `#Primary` / `#Soft` / `#Warning` / `#Danger` / `#Ghost` / `QToolButton` / `#Toolbar > QToolButton` | hover / pressed / **focus** / disabled |
 | Input | `QLineEdit` / `QTextEdit` / `QComboBox` / `#Search` | focus / hover / disabled |
 | Checkbox | `QCheckBox::indicator` | hover / checked / disabled |
 | Tab | `QTabBar::tab` / `QTabWidget::pane` | hover / selected / disabled |
@@ -127,6 +127,45 @@ Tooltip 和 Toast 共用一套"反色药丸"配色（`toast_bg` / `toast_text`�
 3. **不要在界面文件里另写色号 / 圆角 / 时长**。都从 `theme` 取，
    `test_theme_tokens.py` 第 10 节会扫描 `dock.py` / `desktop_browser.py` /
    `widgets.py`，发现残留的硬编码就报错。
+4. **顶栏图标钮的选择器必须写成子选择器** `#Toolbar > QToolButton`，
+   **不能**写成后代选择器 `#Toolbar QToolButton`。后者的特异性 (1,0,1)
+   高于 `#AppManage` (1,0,0)，会把"管理"控件那条虚线描边整条盖掉。
+   （"管理"挂在 `apps_host` 下面，用 `>` 天然把它排除在外。）
+5. **卡片的选中 / 悬停只能走动态属性**，别用 `widget.setStyleSheet()`。
+   内联样式表的特异性高于全局规则，贴上之后 `#FileTile:hover` 就永远不生效
+   —— 症状是"卡片悬停没有任何反应"。正确写法见 `ItemTile._apply_style()`。
+
+---
+
+## 主面板的信息层级（Phase 2）
+
+主面板（`desktop_browser.DesktopBrowser`）的结构没变，改的是**层级**：
+
+| 位置 | 谁是主要信息 | 谁是次级操作 |
+| --- | --- | --- |
+| 顶部 | 标题「桌面收纳」+ 数量徽标 | 刷新 / ≡ / ✕（常态透明、淡色，悬停才浮出来） |
+| 常用启动 | 「常用启动」小标题 + 图标 | 「管理」开关（虚线描边） |
+| 搜索 | Placeholder「搜索文件、文件夹和应用...」 | 「清空」 |
+| 网格 | 卡片本身（图标 + 名称） | — |
+| 底部 | 「打开」= `#Primary` 实心主色 | 「加为常用」= 默认描边 / 「还原到桌面」= `#Warning` 暖色 |
+
+几条容易踩的：
+
+* **常用启动的悬停是"轻微放大图标"**，比例写在 `APP_HOVER_SCALE = 1.12`
+  （需求要求不超过 1.15）。QSS 没有 `transform`，所以用
+  `QPropertyAnimation` 动 `iconSize`；按钮是固定尺寸的，变大的只有图标，
+  整排不会重新排版。
+* **网格卡片的名称是两行 + 末尾省略号**，实现是 `widgets.ElidedLabel`
+  （自己画字），但 `text()` 仍然是**完整**显示名 —— 别处和自检都按它比对。
+* **图标统一大小**靠 `pixmap_for(..., square=True)`：把任意长宽比的图标
+  等比居中放进 `GRID_ICON × GRID_ICON` 的方形画布，否则扁文件夹会比
+  竖文档显得大一圈。
+* **搜索框左侧的放大镜**是 `QLineEdit.addAction(LeadingPosition)`，
+  Qt 会自己把文字让开，所以样式表里**不能**再写 `padding-left`
+  （写了会在图标和文字之间多留一段谁也看不见的空档）。
+* **主面板（`panel.MainPanel`）的两个按钮跟着数量灰掉**：桌面待收纳 = 0
+  时「收纳桌面」disabled，收纳项目 = 0 时「还原桌面」disabled
+  （见 `refresh_cards()`）。
 
 ---
 
@@ -292,6 +331,7 @@ Tooltip 和 Toast 共用一套"反色药丸"配色（`toast_bg` / `toast_text`�
 | **那个按钮还写死叫「加为常用」** | 文案是建按钮时定死的，跟"选中了什么"无关 | `_update_buttons()` 按 `cfg.is_quick(选中项)` 改文案与 tooltip，点下去执行对应的加 / 移 |
 | **右键菜单里没有删除，也没法清掉收纳目录里的东西** | 老代码**完全没有**删除路径（"只搬不删"），但用户确实需要一个"真的不要了"的出口 | 新增 `recycle.py`：右键 →「删除（移到回收站）」，走 Shell 的 `SHFileOperationW + FOF_ALLOWUNDO`（和资源管理器按 Delete 是同一条路径，**可还原**）。详见「删除到回收站」一节 |
 | **各处颜色 / 圆角 / 字号 / 时长各写各的**（圆角这里 9px 那里 10px、下拉框比按钮矮 2px、浅色主题下树控件完全没有样式） | 配色和 QSS 虽然已经集中在 `theme.py`，但只有一层**扁平色号**，没有语义层也没有尺度层；界面文件里还散着内联圆角（`border-radius: 10px`）和写死的定时器间隔 | Phase 1：把 `theme.py` 重构成**三层 Design Token**（语义色彩 token → 尺度 token → 由前者展开的扁平色板，历史短名照旧可用）；九类组件补齐 `hover / focus / disabled` 三态并新增 `#Toast`；散落的硬编码色号 / 圆角 / 时长全部收编（`FILE_TYPE_COLORS` / `RADIUS` / `DURATION`）。详见「视觉系统（Design Token）」一节 |
+| **主面板"信息层级"糊在一起**（标题和操作钮一样重、常用启动那一排没有名字、底部三个按钮一样突出、网格卡片悬停没反应、名字长了被硬切） | 结构是对的，但没有任何"谁主要谁次要"的表达：顶栏刷新/菜单/关闭和标题同色同重；常用启动那一排光秃秃地挂着；`#FileTile:hover` 被 `ItemTile._apply_style()` 的**内联样式表**盖掉（内联特异性高于全局规则），卡片悬停永远没反应；名称用 `QLabel` 自动折行，长名字最后一行被**硬切**、没有省略号；底部三个 `QPushButton` 里只有一个带 `#Soft`，其余是默认款 | Phase 2：顶栏图标钮改 `#Toolbar > QToolButton`（透明底 + 淡色字，悬停才浮出来）；加「常用启动」分节小标题；卡片改成**动态属性** `[selected="true"]` + `#FileTile:hover`；名称换成 `widgets.ElidedLabel`（两行 + 省略号，但 `text()` 仍是完整名）；新增 `#Warning` 按钮变体，底部定成 打开 = `#Primary` / 加为常用 = 默认描边 / 还原 = `#Warning`；搜索框补放大镜 + `:focus` 主色描边（尺寸不变）；图标统一走 `pixmap_for(..., square=True)` 的方形画布。详见「主面板的信息层级（Phase 2）」一节 |
 
 > 顺带修掉一个潜在泄漏：`rebuild()` 每次都 `main_row.addStretch(1)`，
 > 但清场时只摘控制按钮，**弹性占位项会越积越多**——每个都要占一份 spacing，
@@ -312,7 +352,7 @@ Tooltip 和 Toast 共用一套"反色药丸"配色（`toast_bg` / `toast_text`�
 走这一档的地方（`IconLoader.request(..., hi_res=True)`）：
 
 * **菜单栏**：常用软件图标显示 44（可在设置里调到 28~80）；
-* **收纳面板**：网格里的图标显示 **40**、顶部常用启动行显示 34。
+* **收纳面板**：网格里的图标显示 **40**、顶部常用启动行显示 36。
 
 > 收纳面板原来只写了 `ICON_REQUEST = 64`，可 `get_icon()` 顶天只给 32×32，
 > 所以格子里的图其实是把 32 的图**拉大 1.25 倍**——照样糊。
@@ -1161,7 +1201,7 @@ py -3.14 dev\make_release.py --no-build         :: 跳过打包，只重新压�
 **推荐：一键跑完全部**
 
 ```bat
-python dev\run_all.py              :: 自动挑一个能加载 PyQt6 的解释器，十七套依次跑完并汇总
+python dev\run_all.py              :: 自动挑一个能加载 PyQt6 的解释器，十八套依次跑完并汇总
 python dev\run_all.py --list       :: 只列出会跑哪些用例
 python dev\run_all.py --shots      :: 顺带让 test_nest 把界面截图存到 shots\
 python dev\run_all.py --python <解释器路径>   :: 手动指定解释器
@@ -1190,9 +1230,10 @@ python dev\test_round5.py        :: 图标显示不完整：贴边图向外补�
 python dev\test_round6.py        :: 按钮不再崩 / 文案随选中项切换 / 选中态留得住 / 右键删除到回收站（三层取证 + 返回码不可信）/ guard 闸门 / 铁律 AST 检查（63）
 python dev\test_release.py       :: 打包自检：冻结环境下的自启命令与程序目录 / spec 的关键设置 / 新模块能被静态分析到 / 发行说明 / 压缩包结构（47）
 python dev\test_theme_tokens.py  :: 视觉设计系统：三套语义 Token 齐备 / 与扁平色板逐键一致 / 九类组件规则 + 三态齐备 / 字号全 pt / 对比度达标 / 实测按钮·输入框·下拉框一样高 / 界面文件无硬编码（98）
+python dev\test_panel_ux.py      :: 主面板信息层级：顶栏次级操作（含"子选择器没盖掉 #AppManage"的像素取证）/ 常用启动图标·间距·悬停放大 ≤1.15 / 搜索 Placeholder·聚焦尺寸不变·无结果文案 / 网格动态属性 hover·两行省略·图标方形归一化 / 底部三按钮层级 / 主面板按数量灰掉 / 验收六条（91）
 ```
 
-十七套共 **854 项检查**，都只在临时沙盒目录里操作，**不会碰真实桌面**。
+十八套共 **945 项检查**，都只在临时沙盒目录里操作，**不会碰真实桌面**。
 `--shots` 会把界面截图存到 `shots\`。
 
 > `test_round4.py` 的项数会在 **47 ~ 49** 之间浮动：它有一条"本环境允不允许建本地套接字"
