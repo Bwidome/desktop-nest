@@ -435,6 +435,63 @@ def main() -> int:
           "回收站" in browser.hint.text(), browser.hint.text())
 
     # ==================================================================
+    section("E2. 返回码不可全信：只看「文件还在不在」这个事实")
+    # 本机实测：只要带上 FOF_ALLOWUNDO，Shell 会在**成功之后**仍然返回 2
+    # （ERROR_FILE_NOT_FOUND）—— 文件明明已经进了回收站、$I 里的原始路径
+    # 也完全正确（就是上面 E 节验证过的）。不带 ALLOWUNDO 时才返回 0。
+    # 反过来也见过：返回 0 而文件还在（被别的程序占着）。
+    #
+    # 所以 `recycle()` 的判据必须是**事实**而不是返回码。这里用两个"撒谎的
+    # 假 Shell"把两个方向都钉住 —— 否则哪天有人把它改回 `if code != 0: return
+    # False`，在这台机器上就会变成"点了删除、文件进了回收站、界面却报失败"。
+    real_shell = recycle._shell32()
+
+    class LyingShell:
+        """文件照搬走，返回码照报 2（复刻本机 Shell 的行为）。"""
+
+        def __init__(self, trash: Path):
+            self.trash = trash
+            self.calls = 0
+
+        def SHFileOperationW(self, ptr):
+            self.calls += 1
+            st = ctypes.cast(ptr, ctypes.POINTER(recycle._SHFILEOPSTRUCTW)).contents
+            src = Path(st.pFrom)
+            self.trash.mkdir(parents=True, exist_ok=True)
+            os.replace(src, self.trash / src.name)      # 等价于"进了回收站"
+            return 2                                    # ← 谎报
+
+    class LazyShell:
+        """返回 0 却什么也不做（复刻"Shell 报成功、文件还在"）。"""
+
+        def SHFileOperationW(self, ptr):
+            return 0
+
+    trash = base / "fake-bin"
+    lying = LyingShell(trash)
+    victim2 = store / "再删一个.txt"
+    victim2.write_bytes(b"y" * 1234)
+    recycle._SHELL32 = lying                            # 绕过单例，换成假 Shell
+    try:
+        ok2, why2 = recycle.recycle(victim2)
+    finally:
+        recycle._SHELL32 = real_shell
+    check("假 Shell 确实被调到了", lying.calls == 1, str(lying.calls))
+    check("文件确实被搬走了", not victim2.exists())
+    check("★ 返回码是 2（报错）但文件真的没了 → 仍然算成功", ok2, why2)
+
+    victim3 = store / "没删掉.txt"
+    victim3.write_bytes(b"z" * 999)
+    recycle._SHELL32 = LazyShell()
+    try:
+        ok3, why3 = recycle.recycle(victim3)
+    finally:
+        recycle._SHELL32 = real_shell
+    check("★ 反过来：返回 0 但文件还在 → 必须算失败（不能谎报成功）",
+          not ok3, why3)
+    check("而且文件真的还在（界面才不会「删了却还在」）", victim3.exists())
+
+    # ==================================================================
     section("F. 删掉的如果是常用软件，要顺手从常用启动里摘掉")
     calc = item_named("计算器.lnk")
     check("计算器条目在", calc is not None)
@@ -501,6 +558,19 @@ def main() -> int:
 
     check("recycle() 自己会再过一遍 guard()",
           "guard(path)" in src and "def recycle" in src)
+
+    # 判据必须是"文件还在不在"，不能只信 Shell 的返回码（见 E2 节）。
+    # 这条是防回归的：有人把它改回 `if code != 0: return False` 就红。
+    recycle_body = ""
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.FunctionDef) and node.name == "recycle":
+            recycle_body = ast.get_source_segment(src, node) or ""
+    check("recycle() 用 safe_exists 判成败（而不是只看返回码）",
+          "safe_exists(target)" in recycle_body,
+          recycle_body[:80].replace("\n", " "))
+    check("…而且那个判断排在「code != 0 就返回失败」**之前**",
+          recycle_body.find("safe_exists(target)")
+          < recycle_body.find("if code != 0"), "")
 
     ui_src = (HERE / "desktop_browser.py").read_text(encoding="utf-8")
     check("btn_add 用 lambda 把 clicked 的 bool 吃掉了",

@@ -374,9 +374,25 @@ def _pythonw() -> str:
     return str(candidate if candidate.exists() else exe)
 
 
-def autostart_command(entry_script: "Path | None" = None) -> str:
+def autostart_target(entry_script: "Path | None" = None) -> "tuple[str, str]":
+    """开机自启要执行什么 —— 返回 `(可执行文件, 附加参数)`。
+
+    **打包成 exe 之后不能再写"解释器 + main.py"**：发行版目录里根本没有
+    `main.py`，也没有 `python.exe`，那样写出来的自启项一点就报错
+    （用户看到的是"开机自启打开了，但开机后什么也没发生"）。
+
+    冻结时正确写法就是 **exe 自己 + `--silent`**：
+        "C:\\...\\DesktopNest.exe" --silent
+    """
+    if getattr(sys, "frozen", False):
+        return str(Path(sys.executable)), ""
     script = entry_script or (default_project_dir() / "main.py")
-    return f'"{_pythonw()}" "{script}" --silent'
+    return _pythonw(), f'"{script}" '
+
+
+def autostart_command(entry_script: "Path | None" = None) -> str:
+    exe, prefix = autostart_target(entry_script)
+    return f'"{exe}" {prefix}--silent'
 
 
 def startup_folder() -> Path:
@@ -398,17 +414,16 @@ def _write_startup_shortcut(entry_script: "Path | None" = None) -> bool:
     快捷方式的写法统一走 `winlink.create_shortcut`——COM 虚表下标只有那一处
     定义，避免两处各抄一份、日后改下标时悄悄不同步。
     """
-    script = entry_script or (default_project_dir() / "main.py")
+    exe, prefix = autostart_target(entry_script)
     link = _startup_shortcut()
     try:
         link.parent.mkdir(parents=True, exist_ok=True)
-        pythonw = _pythonw()
         ok, reason = winlink.create_shortcut(
             link,
-            pythonw,
-            arguments=f'"{script}" --silent',
-            icon_path=pythonw,
-            working_dir=str(script.parent),
+            exe,
+            arguments=f"{prefix}--silent".strip(),
+            icon_path=exe,
+            working_dir=str(Path(exe).parent),
         )
         if not ok:
             log(f"写启动文件夹快捷方式失败：{reason}")
@@ -440,7 +455,9 @@ def set_autostart(enabled: bool, entry_script: "Path | None" = None) -> bool:
     """写入 / 删除开机自启。注册表优先，失败则用「启动」文件夹。"""
     if sys.platform != "win32":
         return False
-    script = entry_script or (default_project_dir() / "main.py")
+    # 具体启动什么交给 autostart_target() 判断（冻结版是 exe 自己，
+    # 脚本版才是 "pythonw.exe main.py"）。这里只透传调用方的覆盖值。
+    script = entry_script
 
     registry_ok = False
     try:

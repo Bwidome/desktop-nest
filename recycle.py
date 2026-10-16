@@ -238,15 +238,27 @@ def recycle(path: "Path | str") -> "tuple[bool, str]":
         return False, f"调用 Shell 删除接口失败：{exc}"
 
     code = int(code)
+
+    # ------------------------------------------------------------------
+    # 判据是**事实**，不是返回码。
+    #
+    # 实测（本机 Win11）：只要带上 `FOF_ALLOWUNDO`，Shell 会在**成功**之后
+    # 仍然返回 `2`（ERROR_FILE_NOT_FOUND）—— 文件明明已经进了回收站、
+    # `$I` 元数据里的原始路径也完全正确。不带 `ALLOWUNDO` 时才规规矩矩返回 0。
+    # 反过来也见过：返回 0 而文件还在（被别的程序占着）。
+    #
+    # 所以这里两种方向都不能信，只看一件事：**文件还在不在原位置**。
+    # 在 = 没成功；不在 = 成功（`guard()` 已经确认过它之前是存在的，
+    # 而 pFrom 只有这一个路径，Shell 没有别的可动）。
+    # ------------------------------------------------------------------
+    if not safety.safe_exists(target):
+        return True, ""
+
     if code != 0:
         return False, error_text(code)
     if int(struct.fAnyOperationsAborted):
         return False, "操作被中断"
-    if safety.safe_exists(target):
-        # Shell 说成功、文件却还在：多半是被别的程序占着。
-        # 这时候**不能**谎报成功，否则界面上那条会消失、文件却还躺着。
-        return False, "Shell 报告成功，但文件仍在（可能正被其他程序占用）"
-    return True, ""
+    return False, "Shell 报告成功，但文件仍在（可能正被其他程序占用）"
 
 
 # --------------------------------------------------------------------------

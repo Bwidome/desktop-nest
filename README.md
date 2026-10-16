@@ -698,8 +698,16 @@ C:\Users\<你>\.desktop-nest\
   Shell 读到垃圾值，表现是"明明成功却报失败"。
 * `pFrom` 必须是**绝对路径**且以**两个 `\0`** 结尾（双空终止的多字符串）——
   在 ctypes 里就是 `absolute + "\0"`（`c_wchar_p` 会再补一个）。
-* Shell 报成功但文件还在（多半被别的程序占着）时**不能谎报成功**，
-  否则界面上那条会消失、文件却还躺着。
+* **成败的判据是「文件还在不在」，不是 Shell 的返回码。** 两个方向都实测过：
+  * 本机 Win11 上，只要带上 `FOF_ALLOWUNDO`，Shell 会在**成功之后仍然返回 `2`**
+    （`ERROR_FILE_NOT_FOUND`）—— 文件明明已经进了回收站、`$I` 里的原始路径
+    也完全正确（不带 `ALLOWUNDO` 时才规规矩矩返回 0）。
+  * 反过来也见过：返回 `0` 而文件还在（被别的程序占着）。
+
+  所以 `recycle()` 先看 `safety.safe_exists(target)`：不在了就是成功，
+  还在才去解释返回码。写成 `if code != 0: return False` 的话，在这台机器上
+  就会变成"文件进了回收站、界面却报失败"。`dev/test_round6.py` 的 E2 节
+  用两个"撒谎的假 Shell"把两个方向都钉住了。
 
 > ⚠️ 顺带一个排查记录：`SHQueryRecycleBinW` 返回的条目数/体积在这台机器上
 > **会被无关操作带偏**——`config.data_dir()` 每进程一次的 `.write-test`
@@ -821,9 +829,13 @@ desktop-nest\
 ├── 桌面收纳.spec            PyInstaller 打包脚本（见文末「打包成 exe」）
 ├── requirements.txt        运行依赖（PyQt6）
 ├── .gitignore / .gitattributes  版本管理：忽略大件与运行期数据、统一换行符
+├── release\
+│   └── 使用说明.txt         发行压缩包里那份说明的模板（`make_release.py` 会拷进去）
 ├── libs\                   自带 Qt 运行库（约 215 MB，可删）
 ├── shots\                  README 用的截图
 ├── dev\                    自检脚本（`run_all.py` 可一次跑完全部；`shot_panel.py` 重拍四张界面截图）
+│   └── make_release.py     ← 一键出发行压缩包（打包 + 改名 + 补说明 + 压缩）
+├── .tmp\                   构建中间产物（`release-build\` 等，随时可删）
 └── .data\                  运行期数据：config.json / journal.jsonl / app.log
 ```
 
@@ -957,12 +969,50 @@ pyinstaller 桌面收纳.spec --noconfirm
 * 打包后第一次运行请**先在沙盒目录里试一遍**（设置里把桌面指到临时目录），
   确认收纳 / 还原都正常再正式用。
 * 打包版和脚本版**共用同一份配置**（`~\.desktop-nest\` 与 `.data\`），可以随时互换。
+
+### 出一份发行压缩包（推荐走脚本）
+
+上面那条 `pyinstaller` 命令只是"能出 exe"；真正要发给别人用时，
+还得改名、补说明、压缩。这三步合并成了一条命令：
+
+```bat
+py -3.14 dev\make_release.py                    :: 默认 v0.2
+py -3.14 dev\make_release.py --version v0.3     :: 换版本号
+py -3.14 dev\make_release.py --no-build         :: 跳过打包，只重新压缩
+```
+
+它做三件事：
+
+| 步骤 | 做什么 | 为什么 |
+| --- | --- | --- |
+| 1. 打包 | 用 `桌面收纳.spec` 跑 PyInstaller（onedir） | 所有关键设置都在 spec 里，别手敲 |
+| 2. 整理 | `桌面收纳.exe` → **`DesktopNest.exe`**，再把 `release\使用说明.txt` 拷进去 | exe 的图标 / 清单 / 版本资源都是内嵌的，改名不会丢；老用户的快捷方式也还能用 |
+| 3. 压缩 | 把产物目录**里面的内容**打进 `desktop-nest-release-v0.2.zip` | 解压后根目录直接是 `DesktopNest.exe` + `_internal` + `使用说明.txt`，**双击就能用**，不用再进一层目录 |
+
+> **为什么构建到 `.tmp\release-build\` 而不是 `dist\`**
+> `dist\` 里躺着上一次的产物时，PyInstaller 的 `--noconfirm` 会**先把它删掉**；
+> 本机跑在带"安全删除"拦截的环境里，这种批量删除会被拦下来要求人工确认，构建就卡住了。
+> 所以脚本改成**从不删除任何东西**：每次构建到一个全新目录，
+> 目标已存在就把它**改名让位**（`.old1` / `.old2` …）。
+> `.tmp\` 整个目录随时可以手动删掉，不影响任何东西。
+
+### 冻结环境（打包后）和脚本版不一样的地方
+
+发行版是 exe，有几处**必须换写法**，写错了不会崩、只会静默失效：
+
+| 位置 | 脚本版 | 冻结版（exe） | 写错的后果 |
+| --- | --- | --- | --- |
+| `config.autostart_target()` | `pythonw.exe` + `main.py` | **exe 自己** + `--silent` | 开机自启打开了但开机后什么也没发生（exe 目录里根本没有 `main.py`） |
+| `config.default_project_dir()` | `__file__` 所在目录 | **exe 所在目录** | 配置 / 图标缓存每次启动从零开始，还在 `%TEMP%` 里堆 `_MEIxxxx` 目录 |
+
+这两条都有 `dev/test_release.py` 盯着（它把 `sys.frozen` / `sys.executable`
+临时换掉，两种环境各验一遍，再把 `桌面收纳.spec` 当 AST 读一遍钉住打包设置）。
 ## 开发者：自检脚本
 
 **推荐：一键跑完全部**
 
 ```bat
-python dev\run_all.py              :: 自动挑一个能加载 PyQt6 的解释器，十四套依次跑完并汇总
+python dev\run_all.py              :: 自动挑一个能加载 PyQt6 的解释器，十五套依次跑完并汇总
 python dev\run_all.py --list       :: 只列出会跑哪些用例
 python dev\run_all.py --shots      :: 顺带让 test_nest 把界面截图存到 shots\
 python dev\run_all.py --python <解释器路径>   :: 手动指定解释器
@@ -987,10 +1037,11 @@ python dev\test_requirements_round2.py :: 自由移动 / 图标余量 / nest_roo
 python dev\test_nest.py --shots  :: 收纳主流程 / 两个桌面 / 分页 / 后缀开关 / Dock 稳定性 / 启动收纳退出还原（117）
 python dev\test_round4.py        :: 启动时序取图标 / 取图那刻现算路径 / 失败重试 / 高清 .lnk hint / 单实例（互斥体·跨进程·叫醒·自检让路）（47）
 python dev\test_round5.py        :: 图标显示不完整：贴边图向外补余量 / 居中图照旧裁剪 / 幂等 / 缩到显示尺寸仍有余量（22）
-python dev\test_round6.py        :: 按钮不再崩 / 文案随选中项切换 / 选中态留得住 / 右键删除到回收站（三层取证）/ guard 闸门 / 铁律 AST 检查（56）
+python dev\test_round6.py        :: 按钮不再崩 / 文案随选中项切换 / 选中态留得住 / 右键删除到回收站（三层取证 + 返回码不可信）/ guard 闸门 / 铁律 AST 检查（63）
+python dev\test_release.py       :: 打包自检：冻结环境下的自启命令与程序目录 / spec 的关键设置 / 发行说明 / 压缩包结构（43）
 ```
 
-十四套共 **637 项检查**，都只在临时沙盒目录里操作，**不会碰真实桌面**。
+十五套共 **687 项检查**，都只在临时沙盒目录里操作，**不会碰真实桌面**。
 `--shots` 会把界面截图存到 `shots\`。
 
 > **面板只展示收纳目录里的内容**（需求6 去掉了系统位置）。所以凡是要
