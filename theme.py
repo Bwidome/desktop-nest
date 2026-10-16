@@ -1,129 +1,274 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-桌面收纳美化工具 —— 外观主题
-============================
-需求 6：整体简约浅色、圆角控件、间距合理、轻量不花哨。
+桌面收纳美化工具 —— 视觉设计系统（Design System）
+================================================
 
-这里集中放两样东西：
-* `PALETTE`：全套配色（浅色为主，深色可选）
-* `stylesheet()`：一次性生成整份 QSS，所有控件共用，避免每个窗口各写一套
+把散落在各处的颜色 / 圆角 / 字号 / 时长收敛成**一套** Design Token，
+再由这一份 Token 统一生成整份 QSS。主面板、收纳面板、设置窗、Dock、
+右键菜单共用同一份样式表 —— 不再各写一套，也不会出现"这里圆角 9px、
+那里 10px、按钮又比输入框矮 2px"这种事。
+
+三层结构
+--------
+1. **语义色彩 Token**（`COLOR_TOKENS`）—— 颜色只按"用途"命名，
+   浅色 / 深色 / 玻璃各给一套值：
+   `bg / surface / surface_hover / border / text_primary / text_secondary /
+    text_muted / primary / primary_hover / success / warning / danger …`
+   想换配色只动这一张表。
+
+2. **尺度 Token** —— 圆角 `RADIUS`、阴影 `SHADOW`、控件高度 `CONTROL`、
+   字号 `FONT_SIZE`、字重 `FONT_WEIGHT`、动画时长 `DURATION`、缓动 `EASING`。
+
+3. **扁平调色板**（`LIGHT` / `DARK` / `GLASS`）—— 由第 1 层展开而来，
+   同时保留历史键名（`accent` / `text_sub` / `hover` …），老调用点无需改动。
+
+`stylesheet()` 是唯一的 QSS 出口。
+
+设计方向（不要改）
+------------------
+深色 / 半透明 / 圆角 / 蓝紫强调。「现代 Windows 桌面工具」——克制、高级、安静。
+不做赛博朋克、不做游戏 UI、不铺霓虹、不过度玻璃与渐变。
 """
 
 from __future__ import annotations
 
-# --------------------------------------------------------------------------
-# 配色
-# --------------------------------------------------------------------------
-LIGHT = {
-    "bg": "#F5F6F8",            # 窗口底
-    "surface": "#FFFFFF",       # 卡片
-    "surface_alt": "#FAFBFC",
-    "hover": "#F1F3F7",
-    "pressed": "#E7EAF0",
-    "border": "#E6E8EC",
-    "border_strong": "#D7DAE0",
-    "text": "#1D2129",
-    "text_sub": "#6B7280",
-    "text_faint": "#9AA1AC",
-    "accent": "#4F6BED",
-    "accent_hover": "#6180F5",
-    "accent_pressed": "#3F58D6",
-    "accent_soft": "#EDF1FE",
-    "success": "#12A150",
-    "success_soft": "#E9F7EF",
-    "warn": "#C77700",
-    "warn_soft": "#FDF3E3",
-    "danger": "#D93025",
-    "danger_soft": "#FDECEA",
-    "highlight": "#FFE9A8",     # 搜索命中底色
-    "shadow": "#B9C0CC",
-    # 上拉菜单（收纳面板）用半透明底色，让桌面微微透出来，观感更轻
-    "popup": "rgba(255, 255, 255, 0.90)",
-    "popup_alt": "rgba(247, 249, 252, 0.86)",
-    "popup_border": "rgba(15, 23, 42, 0.10)",
+# ==========================================================================
+# 一、语义色彩 Token
+# ==========================================================================
+# 命名规则：只描述"这块颜色是干什么用的"，不带明暗、不带控件名。
+# 三套 scheme 用同一组键，`stylesheet()` 才能只换 token 不换规则。
+#
+# ⚠️ `glass` 是**恒定深色**的一套，不跟明暗主题走：需求要的就是
+#    "半透明深色 + 磨砂"的悬浮卡片，浅色主题下把它做成白底就没味道了。
+COLOR_TOKENS = {
+    # ---------------- 浅色 ----------------
+    "light": {
+        # 底与面
+        "bg": "#F5F6F8",                  # 窗口底（Background）
+        "surface": "#FFFFFF",             # 卡片 / 控件底（Surface）
+        "surface_alt": "#FAFBFC",         # 次级面（表头 / 斑马纹）
+        "surface_hover": "#F1F3F7",       # 悬停（Surface Hover）
+        "surface_pressed": "#E7EAF0",     # 按下
+        "border": "#E6E8EC",              # 常规描边（Border）
+        "border_strong": "#D7DAE0",       # 控件描边（输入框 / 按钮）
+        # 文字
+        "text_primary": "#1D2129",        # 正文（Text Primary）
+        "text_secondary": "#6B7280",      # 次要（Text Secondary）
+        "text_muted": "#9AA1AC",          # 弱化 / 占位（Text Muted）
+        # 主色
+        "primary": "#4F6BED",             # 品牌蓝紫（Primary）
+        "primary_hover": "#6180F5",       # 悬停（Primary Hover）
+        "primary_pressed": "#3F58D6",
+        "primary_soft": "#EDF1FE",        # 主色淡底（选中态）
+        # 语义色
+        "success": "#12A150",
+        "success_soft": "#E9F7EF",
+        "warning": "#C77700",
+        "warning_soft": "#FDF3E3",
+        "danger": "#D93025",
+        "danger_soft": "#FDECEA",
+        # 其它
+        "highlight": "#FFE9A8",           # 搜索命中底色
+        "shadow": "#B9C0CC",
+        "popup": "rgba(255, 255, 255, 0.90)",
+        "popup_alt": "rgba(247, 249, 252, 0.86)",
+        "popup_border": "rgba(15, 23, 42, 0.10)",
+        # Tooltip / Toast 共用（"反色药丸"：深底浅字）
+        "toast_bg": "#1D2129",
+        "toast_text": "#F5F6F8",
+    },
+    # ---------------- 深色 ----------------
+    "dark": {
+        "bg": "#17191E",
+        "surface": "#1F2228",
+        "surface_alt": "#24272E",
+        "surface_hover": "#2A2E36",
+        "surface_pressed": "#31363F",
+        "border": "#2E323A",
+        "border_strong": "#3B414B",
+        "text_primary": "#E9EBEF",
+        "text_secondary": "#9CA3AF",
+        "text_muted": "#6F7681",
+        "primary": "#7089FF",
+        "primary_hover": "#8399FF",
+        "primary_pressed": "#5F76E6",
+        "primary_soft": "#252B3D",
+        "success": "#35C97E",
+        "success_soft": "#1B2A22",
+        "warning": "#E0A33F",
+        "warning_soft": "#2B2418",
+        "danger": "#F2685F",
+        "danger_soft": "#2D1E1D",
+        "highlight": "#7A6520",
+        "shadow": "#0B0D10",
+        "popup": "rgba(31, 34, 40, 0.92)",
+        "popup_alt": "rgba(38, 42, 50, 0.88)",
+        "popup_border": "rgba(255, 255, 255, 0.12)",
+        "toast_bg": "#31363F",
+        "toast_text": "#E9EBEF",
+    },
+    # ---------------- 玻璃卡片（恒定深色）----------------
+    "glass": {
+        # 卡片底（配合磨砂）。注意它和 DWM 的着色是**两层**深色，都调浓就成
+        # 了一块黑板：这里 0.58 + panel.GLASS_TINT_ALPHA 0.26 叠出来约等于
+        # 0.69 的观感，既能看清字，又明显透得出背后的东西。
+        "card": "rgba(24, 26, 32, 0.58)",
+        "card_border": "rgba(255, 255, 255, 0.12)",
+        "bg": "#181A20",
+        "surface": "rgba(255, 255, 255, 0.06)",    # 内部卡片 / 列表底
+        "surface_alt": "rgba(255, 255, 255, 0.04)",
+        "surface_hover": "rgba(255, 255, 255, 0.10)",
+        "surface_pressed": "rgba(255, 255, 255, 0.16)",
+        "border": "rgba(255, 255, 255, 0.10)",
+        "border_strong": "rgba(255, 255, 255, 0.20)",
+        "text_primary": "#F3F5F9",
+        "text_secondary": "#C3CAD6",
+        "text_muted": "#98A1B0",
+        "primary": "#8CA2FF",
+        "primary_hover": "#A0B2FF",
+        "primary_pressed": "#7590F5",
+        "primary_soft": "rgba(140, 162, 255, 0.22)",
+        "success": "#4FD695",
+        "success_soft": "rgba(79, 214, 149, 0.18)",
+        "warning": "#F2BC6A",
+        "warning_soft": "rgba(242, 188, 106, 0.16)",
+        "danger": "#FF9088",
+        "danger_soft": "rgba(255, 144, 136, 0.18)",
+        "highlight": "rgba(255, 214, 102, 0.32)",
+        "shadow": "rgba(0, 0, 0, 0.50)",
+        "popup": "rgba(24, 26, 32, 0.72)",
+        "popup_alt": "rgba(255, 255, 255, 0.06)",
+        "popup_border": "rgba(255, 255, 255, 0.12)",
+        "toast_bg": "#2C3038",
+        "toast_text": "#F3F5F9",
+    },
 }
 
-DARK = {
-    "bg": "#17191E",
-    "surface": "#1F2228",
-    "surface_alt": "#24272E",
-    "hover": "#2A2E36",
-    "pressed": "#31363F",
-    "border": "#2E323A",
-    "border_strong": "#3B414B",
-    "text": "#E9EBEF",
-    "text_sub": "#9CA3AF",
-    "text_faint": "#6F7681",
-    "accent": "#7089FF",
-    "accent_hover": "#8399FF",
-    "accent_pressed": "#5F76E6",
-    "accent_soft": "#252B3D",
-    "success": "#35C97E",
-    "success_soft": "#1B2A22",
-    "warn": "#E0A33F",
-    "warn_soft": "#2B2418",
-    "danger": "#F2685F",
-    "danger_soft": "#2D1E1D",
-    "highlight": "#7A6520",
-    "shadow": "#0B0D10",
-    # 上拉菜单（收纳面板）用半透明底色
-    "popup": "rgba(31, 34, 40, 0.92)",
-    "popup_alt": "rgba(38, 42, 50, 0.88)",
-    "popup_border": "rgba(255, 255, 255, 0.12)",
+# 语义 token → 历史扁平键名。老代码（widgets / dock / panel / …）读的是
+# `accent` / `text_sub` / `hover` 这些短名，这里做一次映射，两边同时可用：
+# 新代码写语义名，老代码不用动。
+_LEGACY_KEYS = {
+    "surface_hover": "hover",
+    "surface_pressed": "pressed",
+    "text_primary": "text",
+    "text_secondary": "text_sub",
+    "text_muted": "text_faint",
+    "primary": "accent",
+    "primary_hover": "accent_hover",
+    "primary_pressed": "accent_pressed",
+    "primary_soft": "accent_soft",
+    "warning": "warn",
+    "warning_soft": "warn_soft",
 }
 
-RADIUS = 10
-RADIUS_SMALL = 7
-# 悬浮玻璃卡片用的大圆角（主面板 + 收纳面板共用）
-GLASS_RADIUS = 22
+
+def _flatten(scheme: dict) -> dict:
+    """把一套语义 token 展开成扁平调色板（含历史键名）。"""
+    flat = dict(scheme)
+    for semantic, legacy in _LEGACY_KEYS.items():
+        if semantic in scheme:
+            flat[legacy] = scheme[semantic]
+    return flat
+
+
+# ==========================================================================
+# 二、尺度 Token
+# ==========================================================================
+# 圆角：从最小的复选框到最大的玻璃卡片，全部从这一把尺子上取。
+# 键名带语义（用在哪），不写死数值，改一处全局生效。
+RADIUS = {
+    "xs": 4,             # 复选框指示器
+    "sm": 6,             # 菜单项 / 提示气泡 / 树行 / 滚动条滑块
+    "md": 7,             # 按钮 / 输入框 / 下拉框 / 关闭按钮
+    "lg": 10,            # 卡片 / 列表 / 图标钮 / 徽标 / 拖放高亮
+    "xl": 12,            # Dock 图标
+    "popup": 16,         # 上拉收纳面板
+    "popup_inner": 15,   # 面板里的顶栏 / 底栏（比面板小 1px，免得直角戳出去）
+    "dock": 18,          # Dock 底板
+    "card": 22,          # 悬浮磨砂玻璃卡片（主面板 + 收纳面板）
+}
+
+# 历史别名：`RADIUS_SMALL` 原来是 7，`RADIUS` 原来是 10（int）。
+RADIUS_SMALL = RADIUS["md"]
+RADIUS_MD = RADIUS["lg"]
+
+# 阴影：QSS **不支持** box-shadow，所以这里是给 QGraphicsDropShadowEffect 用的
+# 参数（`drop_shadow()` 消费）。分三档，避免每个窗口自己拍脑袋写模糊半径。
+SHADOW = {
+    "sm": {"blur": 14, "dx": 0, "dy": 3, "alpha": 46},
+    "md": {"blur": 28, "dx": 0, "dy": 8, "alpha": 62},
+    "lg": {"blur": 48, "dx": 0, "dy": 16, "alpha": 82},
+}
+
+# 控件高度：按钮 / 输入框 / 下拉框共用一个 min-height，加上各自的
+# padding + 边框，三种控件的**自然高度完全相同**（= CONTROL['height']）。
+CONTROL = {
+    "height": 36,        # 目标自然高度（min_height + padding + 边框）
+    "min_height": 20,    # QSS 里的 min-height（20 + 7*2 + 1*2 = 36）
+    "icon_size": 18,     # 控件内小图标
+    "focus_ring": 1,     # 聚焦描边宽度
+}
+
+# 字号：全部用 pt（跟随系统 DPI 缩放），单位换算见 dev/fix_font_units.py。
+FONT_SIZE = {
+    "xs": 8.25,      # 紧凑标签（常用软件名 / 管理钮）
+    "sm": 9.0,       # 辅助 / 提示 / 徽标
+    "base": 9.75,    # 正文（全局默认）
+    "md": 11.0,      # 角标（＋ / －）
+    "close": 11.25,  # 关闭按钮 / 大号加号
+    "lg": 12.75,     # 标题
+    "xl": 16.5,      # 统计数字
+}
+FONT_WEIGHT = {
+    "regular": 400,
+    "medium": 500,
+    "semibold": 600,
+    "bold": 700,
+}
+
+# 动画时长（毫秒）。Qt 的 QSS 没有 transition，这些值给代码里的
+# QTimer / 弹簧动画用；弹簧本身的手感在 springs.py 里。
+DURATION = {
+    "fast": 120,        # 悬停 / 聚焦反馈
+    "normal": 180,      # 面板显隐
+    "slow": 260,        # 较大的位移
+    "settle": 60,       # Dock 尺寸重算的防抖
+    "tick": 16,         # 弹簧动画帧间隔（≈60fps）
+    "highlight": 1200,  # 选中高亮停留
+}
+# 标准缓动曲线（Qt 端由 springs.py 的弹簧实现，这里只作记录 / 给未来用）
+EASING = "cubic-bezier(0.22, 0.80, 0.20, 1.00)"
+
 FONT_FAMILY = '"Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif'
 
-# --------------------------------------------------------------------------
-# 主面板：悬浮磨砂玻璃卡片
-# --------------------------------------------------------------------------
-# 单独一份，**不跟 LIGHT/DARK 走**：需求要的是"半透明深色 + 模糊"的悬浮卡片，
-# 浅色主题下把它做成白底就把"磨砂玻璃"的味道丢掉了。
-# 这里所有底色都带 alpha——留出透明度，好让 DWM 的磨砂（见 acrylic.py）
-# 透上来；不透明的话磨砂就被自己的底色盖住了。
-GLASS = {
-    # 卡片底（配合磨砂）。注意它和 DWM 的着色是**两层**深色，都调浓就成了一块
-    # 黑板：这里 0.58 + panel.GLASS_TINT_ALPHA 0.26 叠出来约等于 0.69 的观感，
-    # 既能看清字，又明显透得出背后的东西。
-    "card": "rgba(24, 26, 32, 0.58)",
-    "card_border": "rgba(255, 255, 255, 0.12)",
-    "surface": "rgba(255, 255, 255, 0.06)",    # 内部卡片 / 列表底
-    "surface_alt": "rgba(255, 255, 255, 0.04)",
-    "hover": "rgba(255, 255, 255, 0.10)",
-    "pressed": "rgba(255, 255, 255, 0.16)",
-    "border": "rgba(255, 255, 255, 0.10)",
-    "border_strong": "rgba(255, 255, 255, 0.20)",
-    "text": "#F3F5F9",
-    "text_sub": "#C3CAD6",
-    "text_faint": "#98A1B0",
-    "accent": "#8CA2FF",
-    "accent_hover": "#A0B2FF",
-    "accent_pressed": "#7590F5",
-    "accent_soft": "rgba(140, 162, 255, 0.22)",
-    "success": "#4FD695",
-    "success_soft": "rgba(79, 214, 149, 0.18)",
-    "warn": "#F2BC6A",
-    "warn_soft": "rgba(242, 188, 106, 0.16)",
-    "danger": "#FF9088",
-    "danger_soft": "rgba(255, 144, 136, 0.18)",
-    "highlight": "rgba(255, 214, 102, 0.32)",
-    "shadow": "rgba(0, 0, 0, 0.50)",
-    "popup": "rgba(24, 26, 32, 0.72)",
-    "popup_alt": "rgba(255, 255, 255, 0.06)",
-    "popup_border": "rgba(255, 255, 255, 0.12)",
+# 文件类型占位色：取不到真实图标时，用这个颜色画一个"首字色块"兜底。
+# 放在主题里是为了和 `primary` 同源——不再两个文件各写一遍 #4F6BED。
+FILE_TYPE_COLORS = {
+    "shortcut": "#4F6BED", "program": "#5B6B8C", "image": "#E09A3E",
+    "video": "#8B5CF6", "audio": "#E0559A", "document": "#4F6BED",
+    "sheet": "#12A150", "slide": "#D9634F", "archive": "#0EA5E9",
+    "code": "#14B8A6", "font": "#A855F7", "folder": "#E3B341", "other": "#94A3B8",
+    "desktop": "#4F6BED",
 }
+# 取不到类型时的兜底色（和 FILE_TYPE_COLORS['other'] 同源）
+FALLBACK_TILE_COLOR = FILE_TYPE_COLORS["other"]
+
+# ==========================================================================
+# 三、扁平调色板（由语义 token 展开，保留历史键名）
+# ==========================================================================
+LIGHT = _flatten(COLOR_TOKENS["light"])
+DARK = _flatten(COLOR_TOKENS["dark"])
+GLASS = _flatten(COLOR_TOKENS["glass"])
+
+# 品牌主色（供绘图类代码取用，别的地方不要再写死色值）
+BRAND_ACCENT = LIGHT["accent"]
 
 # DWM 磨砂的着色。要和 GLASS['card'] 对齐着看：
 # 这两层**都**是深色，都调浓就会叠成一块黑板。
-# 0.58（卡片底）+ 0.26（DWM 着色）叠出来约等于 0.69 的观感：
-# 既看得清字，又明显透得出背后的东西。
 GLASS_TINT = "#181A20"
 GLASS_TINT_ALPHA = 0.26
+GLASS_RADIUS = RADIUS["card"]
 
 # 拿不到磨砂（老系统 / 被策略挡住）时，卡片底色加浓一档——
 # 没有模糊还那么透，文字会看不清。
@@ -132,7 +277,17 @@ GLASS_FALLBACK = ("background: rgba(24, 26, 32, 0.90);"
 
 
 def palette(dark: bool = False) -> dict:
+    """取扁平调色板（浅色 / 深色）。"""
     return dict(DARK if dark else LIGHT)
+
+
+def tokens(scheme: str = "light") -> dict:
+    """取**语义** token（`light` / `dark` / `glass`）。
+
+    和 `palette()` 的区别：这里只有语义键（`text_primary` / `surface_hover` …），
+    不带历史短名，适合新代码用。
+    """
+    return dict(COLOR_TOKENS[scheme])
 
 
 def glass_palette() -> dict:
@@ -165,10 +320,51 @@ def glass_palette_roles() -> dict:
     }
 
 
-def stylesheet(dark: bool = False, *, glass: bool = False) -> str:
-    """生成整份 QSS。
+def drop_shadow(widget, level: str = "md", *, color: "str | None" = None):
+    """给控件挂一档统一阴影（`sm` / `md` / `lg`）。
 
-    glass=True 时把配色换成 `GLASS`（半透明深色），并额外加上两张悬浮卡片的
+    QSS 没有 box-shadow，阴影只能走 `QGraphicsDropShadowEffect`。这里把
+    参数收在 `SHADOW` 里，避免每个窗口自己拍一个模糊半径。返回 effect
+    本身，方便调用方再改；不可用时返回 None（不抛异常）。
+    """
+    spec = SHADOW.get(level) or SHADOW["md"]
+    try:
+        from qt_compat import QColor, QGraphicsDropShadowEffect
+    except Exception:                       # 没有 Qt 环境（纯逻辑测试）
+        return None
+    try:
+        effect = QGraphicsDropShadowEffect(widget)
+        effect.setBlurRadius(spec["blur"])
+        effect.setOffset(spec["dx"], spec["dy"])
+        effect.setColor(QColor(color or LIGHT["shadow"], spec["alpha"]))
+        widget.setGraphicsEffect(effect)
+        return effect
+    except Exception:
+        return None
+
+
+def token_table() -> "list[tuple[str, str, str, str]]":
+    """把三套色彩 token 摊平成表格，供文档 / 自检用。
+
+    返回 `[(token 名, 浅色, 深色, 玻璃), ...]`，顺序按浅色表的定义顺序。
+    """
+    rows = []
+    for name, light in COLOR_TOKENS["light"].items():
+        rows.append((name, light,
+                     COLOR_TOKENS["dark"].get(name, ""),
+                     COLOR_TOKENS["glass"].get(name, "")))
+    for name in ("card", "card_border"):     # 玻璃专属的两个键
+        rows.append((name, "", "", COLOR_TOKENS["glass"].get(name, "")))
+    return rows
+
+
+# ==========================================================================
+# 四、QSS 生成
+# ==========================================================================
+def stylesheet(dark: bool = False, *, glass: bool = False) -> str:
+    """生成整份 QSS（唯一的样式出口）。
+
+    `glass=True` 时把配色换成 `GLASS`（半透明深色），并额外加上两张悬浮卡片的
     规则——磨砂玻璃外观靠它 + `acrylic.py` 的 DWM 模糊一起实现。
 
     两张卡片：
@@ -178,10 +374,16 @@ def stylesheet(dark: bool = False, *, glass: bool = False) -> str:
     ⚠️ 玻璃规则块必须放在**整份样式表的最后**。放在中间的话，后面那些
     `#Popup { background: ... }` 之类的普通规则会把玻璃规则盖掉——
     玻璃看起来"没生效"，其实是被后写的规则赢了。
+
+    规则按**组件**分节（Button / Input / Checkbox / Tab / Card / Tooltip /
+    Toast / Dialog / Menu …），每个组件都写全 `hover` / `focus` / `disabled`
+    三态，这样主面板、管理页面、Dock、右键菜单才是同一套视觉。
     """
     c = palette(dark)
     if glass:
         c.update(GLASS)
+
+    R, F, W = RADIUS, FONT_SIZE, FONT_WEIGHT
 
     glass_block = ""
     if glass:
@@ -210,17 +412,7 @@ QTreeWidget {{
     border: none;
     alternate-background-color: transparent;
 }}
-QTreeWidget::item {{ border-radius: 6px; padding: 3px 4px; }}
-QTreeWidget::item:hover {{ background: {c['hover']}; }}
-QTreeWidget::item:selected {{ background: {c['accent_soft']}; color: {c['text']}; }}
 QHeaderView {{ background: transparent; border: none; }}
-QHeaderView::section {{
-    background: {c['surface_alt']};
-    color: {c['text_faint']};
-    border: none;
-    border-bottom: 1px solid {c['border']};
-    padding: 6px 8px;
-}}
 QTabWidget::pane {{ background: {c['surface']}; }}
 QScrollArea {{ background: transparent; border: none; }}
 QScrollArea > QWidget > QWidget {{ background: transparent; }}
@@ -236,17 +428,17 @@ QMenu::item:selected {{ background: {c['accent_soft']}; color: {c['text']}; }}
 QMenu::separator {{ background: {c['border']}; }}
 QMessageBox QLabel {{ color: {c['text']}; }}
 QToolTip {{
-    background: #2C3038;
-    color: {c['text']};
+    background: {c['toast_bg']};
+    color: {c['toast_text']};
     border: 1px solid {c['card_border']};
 }}
 /* 无边框窗口没有系统标题栏，关闭按钮自己画一个 */
 #GlassClose {{
     background: transparent;
     border: 1px solid transparent;
-    border-radius: 8px;
+    border-radius: {R['md']}px;
     color: {c['text_sub']};
-    font-size: 11.25pt;
+    font-size: {F['close']}pt;
     padding: 1px 9px;
 }}
 #GlassClose:hover {{ background: rgba(255, 118, 108, 0.85); color: #FFFFFF; }}
@@ -254,10 +446,15 @@ QToolTip {{
 """
 
     return f"""
-/* ---------- 全局 ---------- */
+/* ==================================================================
+   桌面收纳 · 统一视觉系统（由 theme.py 的 Design Token 生成）
+   浅色 / 深色 / 玻璃共用同一套规则，只换 token
+   ================================================================== */
+
+/* ---------- 1. 全局 ---------- */
 * {{
     font-family: {FONT_FAMILY};
-    font-size: 9.75pt;
+    font-size: {F['base']}pt;
     outline: none;
 }}
 QWidget {{
@@ -266,79 +463,77 @@ QWidget {{
 QDialog, QMainWindow {{
     background: {c['bg']};
 }}
+QWidget:disabled {{
+    color: {c['text_faint']};
+}}
 
-/* ---------- 卡片容器 ---------- */
+/* ---------- 2. 文字层级 ---------- */
+#Title {{ font-size: {F['lg']}pt; font-weight: {W['semibold']}; }}
+#Subtitle, #Hint {{ color: {c['text_faint']}; font-size: {F['sm']}pt; }}
+#SectionTitle {{ font-size: {F['base']}pt; font-weight: {W['semibold']}; }}
+#Muted {{ color: {c['text_sub']}; }}
+#StatValue {{ font-size: {F['xl']}pt; font-weight: {W['semibold']}; color: {c['text']}; }}
+#StatLabel {{ font-size: {F['sm']}pt; color: {c['text_faint']}; }}
+#AccentText {{ color: {c['accent']}; font-weight: {W['semibold']}; }}
+
+/* ---------- 3. 卡片容器（Card）---------- */
 #Card, #Panel {{
     background: {c['surface']};
     border: 1px solid {c['border']};
-    border-radius: {RADIUS}px;
+    border-radius: {R['lg']}px;
 }}
 
-/* ---------- 上拉菜单（收纳面板）---------- */
-#Popup {{
-    background: {c['popup']};
-    border: 1px solid {c['popup_border']};
-    border-radius: {RADIUS + 6}px;
-}}
-#Toolbar {{
-    background: {c['popup_alt']};
-    border-bottom: 1px solid {c['popup_border']};
-    border-top-left-radius: {RADIUS + 5}px;
-    border-top-right-radius: {RADIUS + 5}px;
-}}
-#FooterBar {{
-    background: {c['popup_alt']};
-    border-top: 1px solid {c['popup_border']};
-    border-bottom-left-radius: {RADIUS + 5}px;
-    border-bottom-right-radius: {RADIUS + 5}px;
-}}
-
-/* ---------- 文字层级 ---------- */
-#Title {{ font-size: 12.75pt; font-weight: 600; }}
-#Subtitle, #Hint {{ color: {c['text_faint']}; font-size: 9pt; }}
-#SectionTitle {{ font-size: 9.75pt; font-weight: 600; }}
-#Muted {{ color: {c['text_sub']}; }}
-#StatValue {{ font-size: 16.5pt; font-weight: 600; color: {c['text']}; }}
-#StatLabel {{ font-size: 9pt; color: {c['text_faint']}; }}
-#AccentText {{ color: {c['accent']}; font-weight: 600; }}
-
-/* ---------- 按钮 ---------- */
+/* ---------- 4. 按钮（Button）---------- */
+/* 基础款 = 次级按钮（描边）；#Primary / #Soft / #Danger / #Ghost 是变体。
+   高度由 min-height + padding 统一算出来，和输入框一样高。 */
 QPushButton {{
     background: {c['surface']};
     border: 1px solid {c['border_strong']};
-    border-radius: {RADIUS_SMALL}px;
+    border-radius: {R['md']}px;
     padding: 7px 15px;
+    min-height: {CONTROL['min_height']}px;
     color: {c['text']};
 }}
 QPushButton:hover {{ background: {c['hover']}; border-color: {c['border_strong']}; }}
 QPushButton:pressed {{ background: {c['pressed']}; }}
-QPushButton:disabled {{ color: {c['text_faint']}; background: {c['surface_alt']}; }}
+QPushButton:focus {{ border-color: {c['accent']}; }}
+QPushButton:disabled {{
+    color: {c['text_faint']};
+    background: {c['surface_alt']};
+    border-color: {c['border']};
+}}
 
 QPushButton#Primary {{
     background: {c['accent']};
     border: 1px solid {c['accent']};
     color: #FFFFFF;
-    font-weight: 600;
+    font-weight: {W['semibold']};
 }}
 QPushButton#Primary:hover {{ background: {c['accent_hover']}; border-color: {c['accent_hover']}; }}
 QPushButton#Primary:pressed {{ background: {c['accent_pressed']}; }}
-QPushButton#Primary:disabled {{ background: {c['border_strong']}; border-color: {c['border_strong']}; color: {c['surface']}; }}
+QPushButton#Primary:disabled {{
+    background: {c['border_strong']};
+    border-color: {c['border_strong']};
+    color: {c['surface']};
+}}
 
 QPushButton#Danger {{
     background: {c['danger_soft']};
     border: 1px solid {c['danger_soft']};
     color: {c['danger']};
-    font-weight: 600;
+    font-weight: {W['semibold']};
 }}
 QPushButton#Danger:hover {{ background: {c['danger']}; border-color: {c['danger']}; color: #FFFFFF; }}
+QPushButton#Danger:disabled {{ background: {c['surface_alt']}; border-color: {c['border']}; color: {c['text_faint']}; }}
 
 QPushButton#Soft {{
     background: {c['accent_soft']};
     border: 1px solid {c['accent_soft']};
     color: {c['accent']};
-    font-weight: 600;
+    font-weight: {W['semibold']};
 }}
 QPushButton#Soft:hover {{ background: {c['accent']}; border-color: {c['accent']}; color: #FFFFFF; }}
+QPushButton#Soft:disabled {{ background: {c['surface_alt']}; border-color: {c['border']}; color: {c['text_faint']}; }}
 
 QPushButton#Ghost {{
     background: transparent;
@@ -347,44 +542,80 @@ QPushButton#Ghost {{
     padding: 6px 10px;
 }}
 QPushButton#Ghost:hover {{ background: {c['hover']}; color: {c['text']}; }}
+QPushButton#Ghost:disabled {{ color: {c['text_faint']}; background: transparent; }}
 
-/* 图标按钮（视图切换） */
+/* 图标按钮（视图切换 / 工具栏） */
 QToolButton {{
     background: transparent;
     border: 1px solid transparent;
-    border-radius: {RADIUS_SMALL}px;
+    border-radius: {R['md']}px;
     padding: 5px;
     color: {c['text_sub']};
 }}
 QToolButton:hover {{ background: {c['hover']}; color: {c['text']}; }}
+QToolButton:pressed {{ background: {c['pressed']}; }}
 QToolButton:checked {{
     background: {c['accent_soft']};
     border-color: {c['accent_soft']};
     color: {c['accent']};
 }}
+QToolButton:disabled {{ color: {c['text_faint']}; background: transparent; }}
 
-/* ---------- 输入框 ---------- */
-QLineEdit {{
+/* ---------- 5. 输入框（Input）---------- */
+QLineEdit, QTextEdit {{
     background: {c['surface']};
     border: 1px solid {c['border_strong']};
-    border-radius: {RADIUS_SMALL}px;
+    border-radius: {R['md']}px;
     padding: 7px 11px;
+    min-height: {CONTROL['min_height']}px;
+    color: {c['text']};
     selection-background-color: {c['accent']};
     selection-color: #FFFFFF;
 }}
-QLineEdit:focus {{ border-color: {c['accent']}; }}
+QLineEdit:focus, QTextEdit:focus {{ border-color: {c['accent']}; }}
+QLineEdit:disabled, QTextEdit:disabled {{
+    color: {c['text_faint']};
+    background: {c['surface_alt']};
+    border-color: {c['border']};
+}}
 QLineEdit#Search {{
     background: {c['surface']};
     padding-left: 30px;
-    border-radius: {RADIUS_SMALL + 4}px;
+    border-radius: {R['lg'] + 1}px;
 }}
 
-/* ---------- 复选框 ---------- */
+QComboBox {{
+    background: {c['surface']};
+    border: 1px solid {c['border_strong']};
+    border-radius: {R['md']}px;
+    padding: 7px 11px;
+    min-height: {CONTROL['min_height']}px;
+    color: {c['text']};
+}}
+QComboBox:hover {{ border-color: {c['accent']}; }}
+QComboBox:focus {{ border-color: {c['accent']}; }}
+QComboBox:disabled {{
+    color: {c['text_faint']};
+    background: {c['surface_alt']};
+    border-color: {c['border']};
+}}
+QComboBox::drop-down {{ border: none; width: 22px; }}
+QComboBox QAbstractItemView {{
+    background: {c['surface']};
+    border: 1px solid {c['border']};
+    border-radius: {R['md']}px;
+    selection-background-color: {c['accent_soft']};
+    selection-color: {c['accent']};
+    padding: 4px;
+}}
+
+/* ---------- 6. 复选框（Checkbox）---------- */
 QCheckBox {{ spacing: 8px; color: {c['text']}; }}
+QCheckBox:disabled {{ color: {c['text_faint']}; }}
 QCheckBox::indicator {{
     width: 17px; height: 17px;
     border: 1px solid {c['border_strong']};
-    border-radius: 4px;
+    border-radius: {R['xs']}px;
     background: {c['surface']};
 }}
 QCheckBox::indicator:hover {{ border-color: {c['accent']}; }}
@@ -393,16 +624,46 @@ QCheckBox::indicator:checked {{
     border-color: {c['accent']};
     image: none;
 }}
+QCheckBox::indicator:disabled {{
+    background: {c['surface_alt']};
+    border-color: {c['border']};
+}}
+QCheckBox::indicator:checked:disabled {{
+    background: {c['border_strong']};
+    border-color: {c['border_strong']};
+}}
 
-/* ---------- 列表 / 图标网格 ---------- */
+/* ---------- 7. 标签页（Tab）---------- */
+QTabWidget::pane {{
+    border: 1px solid {c['border']};
+    border-radius: {R['lg']}px;
+    background: {c['surface']};
+    top: -1px;
+}}
+QTabBar::tab {{
+    background: transparent;
+    color: {c['text_sub']};
+    padding: 8px 16px;
+    margin-right: 4px;
+    border-radius: {R['md']}px;
+}}
+QTabBar::tab:hover {{ background: {c['hover']}; color: {c['text']}; }}
+QTabBar::tab:selected {{
+    background: {c['accent_soft']};
+    color: {c['accent']};
+    font-weight: {W['semibold']};
+}}
+QTabBar::tab:disabled {{ color: {c['text_faint']}; }}
+
+/* ---------- 8. 列表 / 图标网格 ---------- */
 QListWidget {{
     background: {c['surface']};
     border: none;
-    border-radius: {RADIUS}px;
+    border-radius: {R['lg']}px;
     padding: 6px;
 }}
 QListWidget::item {{
-    border-radius: {RADIUS_SMALL}px;
+    border-radius: {R['md']}px;
     color: {c['text']};
 }}
 QListWidget::item:hover {{ background: {c['hover']}; }}
@@ -410,8 +671,26 @@ QListWidget::item:selected {{
     background: {c['accent_soft']};
     color: {c['text']};
 }}
+QListWidget::item:disabled {{ color: {c['text_faint']}; }}
 
-/* ---------- 滚动条 ---------- */
+QTreeWidget {{
+    background: {c['surface']};
+    border: 1px solid {c['border']};
+    border-radius: {R['lg']}px;
+    alternate-background-color: {c['surface_alt']};
+}}
+QTreeWidget::item {{ border-radius: {R['sm']}px; padding: 3px 4px; color: {c['text']}; }}
+QTreeWidget::item:hover {{ background: {c['hover']}; }}
+QTreeWidget::item:selected {{ background: {c['accent_soft']}; color: {c['text']}; }}
+QHeaderView::section {{
+    background: {c['surface_alt']};
+    color: {c['text_faint']};
+    border: none;
+    border-bottom: 1px solid {c['border']};
+    padding: 6px 8px;
+}}
+
+/* ---------- 9. 滚动条 ---------- */
 QScrollBar:vertical {{
     background: transparent;
     width: 10px;
@@ -419,7 +698,7 @@ QScrollBar:vertical {{
 }}
 QScrollBar::handle:vertical {{
     background: {c['border_strong']};
-    border-radius: 5px;
+    border-radius: {R['sm']}px;
     min-height: 30px;
 }}
 QScrollBar::handle:vertical:hover {{ background: {c['text_faint']}; }}
@@ -432,22 +711,23 @@ QScrollBar:horizontal {{
 }}
 QScrollBar::handle:horizontal {{
     background: {c['border_strong']};
-    border-radius: 5px;
+    border-radius: {R['sm']}px;
     min-width: 30px;
 }}
+QScrollBar::handle:horizontal:hover {{ background: {c['text_faint']}; }}
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
 QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background: transparent; }}
 
-/* ---------- 菜单 ---------- */
+/* ---------- 10. 菜单（Menu，含右键菜单）---------- */
 QMenu {{
     background: {c['surface']};
     border: 1px solid {c['border']};
-    border-radius: {RADIUS_SMALL}px;
+    border-radius: {R['md']}px;
     padding: 6px;
 }}
 QMenu::item {{
     padding: 7px 26px 7px 12px;
-    border-radius: 5px;
+    border-radius: {R['sm']}px;
     color: {c['text']};
 }}
 QMenu::item:selected {{ background: {c['accent_soft']}; color: {c['accent']}; }}
@@ -455,28 +735,83 @@ QMenu::item:disabled {{ color: {c['text_faint']}; }}
 QMenu::separator {{ height: 1px; background: {c['border']}; margin: 5px 8px; }}
 QMenu::icon {{ padding-left: 8px; }}
 
-/* ---------- 工具提示 ---------- */
+/* ---------- 11. 工具提示（Tooltip）+ 轻提示（Toast）---------- */
+/* 两者共用一套"反色药丸"配色（toast_bg / toast_text）：
+   浅色主题下是深底浅字，深色 / 玻璃下是深灰底浅字，都够醒目。 */
 QToolTip {{
-    background: {c['text']};
-    color: {c['surface']};
+    background: {c['toast_bg']};
+    color: {c['toast_text']};
     border: none;
-    border-radius: 5px;
+    border-radius: {R['sm']}px;
     padding: 5px 8px;
 }}
+#Toast {{
+    background: {c['toast_bg']};
+    color: {c['toast_text']};
+    border: none;
+    border-radius: {R['md']}px;
+    padding: 9px 14px;
+    font-size: {F['sm']}pt;
+}}
+#ToastOk {{
+    background: {c['success']};
+    color: #FFFFFF;
+    border: none;
+    border-radius: {R['md']}px;
+    padding: 9px 14px;
+    font-size: {F['sm']}pt;
+    font-weight: {W['semibold']};
+}}
+#ToastWarn {{
+    background: {c['warn']};
+    color: #FFFFFF;
+    border: none;
+    border-radius: {R['md']}px;
+    padding: 9px 14px;
+    font-size: {F['sm']}pt;
+    font-weight: {W['semibold']};
+}}
+#ToastDanger {{
+    background: {c['danger']};
+    color: #FFFFFF;
+    border: none;
+    border-radius: {R['md']}px;
+    padding: 9px 14px;
+    font-size: {F['sm']}pt;
+    font-weight: {W['semibold']};
+}}
 
-/* ---------- 消息框 ---------- */
+/* ---------- 12. 对话框（Dialog）---------- */
 QMessageBox {{ background: {c['surface']}; }}
 QMessageBox QLabel {{ color: {c['text']}; }}
+QMessageBox QPushButton {{ min-width: 76px; }}
 
-/* ---------- 滚动区域 ---------- */
+/* ---------- 13. 滚动区域 / 分隔线 ---------- */
 QScrollArea {{ background: transparent; border: none; }}
 QScrollArea > QWidget > QWidget {{ background: transparent; }}
-
-/* ---------- 分隔线 ---------- */
 #Divider {{ background: {c['border']}; max-height: 1px; min-height: 1px; border: none; }}
 #VerticalDivider {{ background: {c['border']}; max-width: 1px; min-width: 1px; border: none; }}
 
-/* ---------- 底部菜单栏（Dock） ---------- */
+/* ---------- 14. 上拉菜单（收纳面板）---------- */
+#Popup {{
+    background: {c['popup']};
+    border: 1px solid {c['popup_border']};
+    border-radius: {R['popup']}px;
+}}
+#Toolbar {{
+    background: {c['popup_alt']};
+    border-bottom: 1px solid {c['popup_border']};
+    border-top-left-radius: {R['popup_inner']}px;
+    border-top-right-radius: {R['popup_inner']}px;
+}}
+#FooterBar {{
+    background: {c['popup_alt']};
+    border-top: 1px solid {c['popup_border']};
+    border-bottom-left-radius: {R['popup_inner']}px;
+    border-bottom-right-radius: {R['popup_inner']}px;
+}}
+
+/* ---------- 15. 底部菜单栏（Dock）---------- */
 /* 需求：菜单栏做成**纯透明**——只留「桌面整理」控件和常用软件的图标浮在桌面上，
    不要那条深色圆角底板。窗口本身已经开了 `WA_TranslucentBackground`，
    所以这里把底和边框都去掉，透出来的就是真实的桌面。
@@ -486,12 +821,12 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
 #DockSurface {{
     background: transparent;
     border: none;
-    border-radius: 18px;
+    border-radius: {R['dock']}px;
 }}
 #DockIcon {{
     background: transparent;
     border: 1px solid transparent;
-    border-radius: 12px;
+    border-radius: {R['xl']}px;
     padding: 0px;
     /* 底板透明之后，图标下面的名字要自己扛住可读性。
        绝大多数桌面壁纸是中到深的，所以用浅色字；再深就靠 tooltip。 */
@@ -514,22 +849,24 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
     border: 1px solid rgba(255, 255, 255, 190);
     border-radius: 2px;
 }}
+/* 以下是 Dock 上控制按钮的历史样式（当前实现用 #AppManage / #AppButton，
+   这两组保留下来，避免旧布局万一回来时没样式可套）。 */
 #DockNav {{
     background: rgba(52, 56, 66, 0.34);
     border: 1px solid rgba(255, 255, 255, 40);
-    border-radius: 9px;
+    border-radius: {R['lg']}px;
     color: #F2F4F8;
-    font-size: 9pt;
+    font-size: {F['sm']}pt;
 }}
 #DockNav:hover {{ background: rgba(52, 56, 66, 0.62); border-color: rgba(255, 255, 255, 90); }}
 #DockNav:disabled {{ color: rgba(242, 244, 248, 90); background: rgba(52, 56, 66, 0.16); }}
 #DockAdd, #DockDel {{
     background: rgba(52, 56, 66, 0.34);
     border: 1px dashed rgba(255, 255, 255, 90);
-    border-radius: 10px;
+    border-radius: {R['lg']}px;
     color: #F2F4F8;
-    font-size: 11.25pt;
-    font-weight: 600;
+    font-size: {F['close']}pt;
+    font-weight: {W['semibold']};
 }}
 #DockAdd:hover, #DockDel:hover {{
     background: rgba(52, 56, 66, 0.62);
@@ -541,13 +878,13 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
     border-color: rgba(255, 255, 255, 40);
 }}
 
-/* ---------- 常用启动小快捷方式（图标+名称） ---------- */
+/* ---------- 16. 常用启动小快捷方式（图标 + 名称）---------- */
 #AppButton {{
     background: transparent;
     border: 1px solid transparent;
-    border-radius: 10px;
+    border-radius: {R['lg']}px;
     color: {c['text']};
-    font-size: 8.25pt;
+    font-size: {F['xs']}pt;
     padding: 2px;
 }}
 #AppButton:hover {{
@@ -561,9 +898,9 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
 #AppManage {{
     background: transparent;
     border: 1px dashed {c['border_strong']};
-    border-radius: 10px;
+    border-radius: {R['lg']}px;
     color: {c['text_sub']};
-    font-size: 8.25pt;
+    font-size: {F['xs']}pt;
 }}
 #AppManage:hover {{
     background: {c['hover']};
@@ -575,14 +912,14 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
     border: 1px solid {c['accent']};
     color: {c['accent']};
 }}
-#TileName {{ font-size: 9pt; }}
+#TileName {{ font-size: {F['sm']}pt; }}
 
-/* ---------- 管理模式下卡片角上的「＋ / －」 ---------- */
+/* ---------- 17. 管理模式下卡片角上的「＋ / －」 ---------- */
 /* 20×20 的小圆钮。给足对比度：它压在图标上，底色太淡就分不清是按钮还是图标的一部分。 */
 #BadgeAdd, #BadgeRemove {{
-    border-radius: 10px;
-    font-size: 11pt;
-    font-weight: 700;
+    border-radius: {R['lg']}px;
+    font-size: {F['md']}pt;
+    font-weight: {W['bold']};
     padding: 0px;
 }}
 #BadgeAdd {{
@@ -598,40 +935,41 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
 #BadgeAdd:hover, #BadgeRemove:hover {{
     border: 2px solid #FFFFFF;
 }}
-/* ---------- 文件网格卡片 ---------- */
+
+/* ---------- 18. 文件网格卡片 ---------- */
 #FileTile {{
     background: transparent;
     border: 1px solid transparent;
-    border-radius: 10px;
+    border-radius: {R['lg']}px;
 }}
 #FileTile:hover {{
     background: {c['hover']};
 }}
 
-/* ---------- 提示条 ---------- */
+/* ---------- 19. 提示条 ---------- */
 #Notice {{
     background: {c['warn_soft']};
     color: {c['warn']};
     border: 1px solid {c['warn_soft']};
-    border-radius: {RADIUS_SMALL}px;
+    border-radius: {R['md']}px;
     padding: 9px 13px;
-    font-size: 9pt;
+    font-size: {F['sm']}pt;
 }}
 
-/* ---------- 徽标 ---------- */
+/* ---------- 20. 徽标 ---------- */
 #Badge {{
     background: {c['accent_soft']};
     color: {c['accent']};
-    border-radius: 9px;
+    border-radius: {R['lg']}px;
     padding: 3px 10px;
-    font-size: 9pt;
-    font-weight: 600;
+    font-size: {F['sm']}pt;
+    font-weight: {W['semibold']};
 }}
-#BadgeOk {{ background: {c['success_soft']}; color: {c['success']}; border-radius: 9px; padding: 3px 10px; font-size: 9pt; font-weight: 600; }}
-#BadgeWarn {{ background: {c['warn_soft']}; color: {c['warn']}; border-radius: 9px; padding: 3px 10px; font-size: 9pt; font-weight: 600; }}
-#BadgeDanger {{ background: {c['danger_soft']}; color: {c['danger']}; border-radius: 9px; padding: 3px 10px; font-size: 9pt; font-weight: 600; }}
+#BadgeOk {{ background: {c['success_soft']}; color: {c['success']}; border-radius: {R['lg']}px; padding: 3px 10px; font-size: {F['sm']}pt; font-weight: {W['semibold']}; }}
+#BadgeWarn {{ background: {c['warn_soft']}; color: {c['warn']}; border-radius: {R['lg']}px; padding: 3px 10px; font-size: {F['sm']}pt; font-weight: {W['semibold']}; }}
+#BadgeDanger {{ background: {c['danger_soft']}; color: {c['danger']}; border-radius: {R['lg']}px; padding: 3px 10px; font-size: {F['sm']}pt; font-weight: {W['semibold']}; }}
 
-/* ---------- 进度条 ---------- */
+/* ---------- 21. 进度条 ---------- */
 QProgressBar {{
     background: {c['border']};
     border: none;
@@ -641,33 +979,4 @@ QProgressBar {{
     color: transparent;
 }}
 QProgressBar::chunk {{ background: {c['accent']}; border-radius: 3px; }}
-
-/* ---------- 标签页（设置窗用） ---------- */
-QTabWidget::pane {{ border: 1px solid {c['border']}; border-radius: {RADIUS}px; background: {c['surface']}; top: -1px; }}
-QTabBar::tab {{
-    background: transparent;
-    color: {c['text_sub']};
-    padding: 8px 16px;
-    margin-right: 4px;
-    border-radius: {RADIUS_SMALL}px;
-}}
-QTabBar::tab:hover {{ background: {c['hover']}; }}
-QTabBar::tab:selected {{ background: {c['accent_soft']}; color: {c['accent']}; font-weight: 600; }}
-
-/* ---------- 下拉框 ---------- */
-QComboBox {{
-    background: {c['surface']};
-    border: 1px solid {c['border_strong']};
-    border-radius: {RADIUS_SMALL}px;
-    padding: 6px 10px;
-}}
-QComboBox:hover {{ border-color: {c['accent']}; }}
-QComboBox QAbstractItemView {{
-    background: {c['surface']};
-    border: 1px solid {c['border']};
-    border-radius: {RADIUS_SMALL}px;
-    selection-background-color: {c['accent_soft']};
-    selection-color: {c['accent']};
-    padding: 4px;
-}}
 {glass_block}"""

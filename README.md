@@ -41,6 +41,95 @@
 
 ---
 
+## 视觉系统（Design Token）
+
+所有界面（主面板 / 收纳面板 / 设置窗 / Dock / 右键菜单）共用**同一份**样式表，
+由 `theme.py` 里的 Design Token 统一生成。没有第二套颜色体系，也没有哪个窗口
+自己写一段 QSS 另起炉灶。
+
+### 三层结构
+
+| 层 | 在哪 | 作用 |
+| --- | --- | --- |
+| **语义色彩 Token** | `theme.COLOR_TOKENS` | 颜色只按用途命名，浅色 / 深色 / 玻璃各一套值 |
+| **尺度 Token** | `RADIUS` / `SHADOW` / `CONTROL` / `FONT_SIZE` / `FONT_WEIGHT` / `DURATION` / `EASING` | 圆角、阴影、控件高度、字号字重、动画时长 |
+| **扁平色板** | `LIGHT` / `DARK` / `GLASS` | 由第 1 层展开，**保留历史短名**（`accent` / `text_sub` / `hover` …） |
+
+想换配色只动 `COLOR_TOKENS` 一张表；想改圆角只动 `RADIUS`；
+老代码读的 `theme.LIGHT["accent"]` 这类短名照旧能用，不用改一行。
+
+### 色彩 Token 一览
+
+| Token | 用途 | 浅色 | 深色 | 玻璃 |
+| --- | --- | --- | --- | --- |
+| `bg` | 窗口底 | `#F5F6F8` | `#17191E` | `#181A20` |
+| `surface` | 卡片 / 控件底 | `#FFFFFF` | `#1F2228` | `rgba(255,255,255,.06)` |
+| `surface_hover` | 悬停底 | `#F1F3F7` | `#2A2E36` | `rgba(255,255,255,.10)` |
+| `border` | 常规描边 | `#E6E8EC` | `#2E323A` | `rgba(255,255,255,.10)` |
+| `border_strong` | 控件描边 | `#D7DAE0` | `#3B414B` | `rgba(255,255,255,.20)` |
+| `text_primary` | 正文 | `#1D2129` | `#E9EBEF` | `#F3F5F9` |
+| `text_secondary` | 次要文字 | `#6B7280` | `#9CA3AF` | `#C3CAD6` |
+| `text_muted` | 弱化 / 占位 | `#9AA1AC` | `#6F7681` | `#98A1B0` |
+| `primary` | 品牌蓝紫 | `#4F6BED` | `#7089FF` | `#8CA2FF` |
+| `primary_hover` | 主色悬停 | `#6180F5` | `#8399FF` | `#A0B2FF` |
+| `success` | 成功 | `#12A150` | `#35C97E` | `#4FD695` |
+| `warning` | 警告 | `#C77700` | `#E0A33F` | `#F2BC6A` |
+| `danger` | 危险 / 删除 | `#D93025` | `#F2685F` | `#FF9088` |
+
+（完整表可以直接跑 `theme.token_table()` 打出来，不用手工同步。）
+
+### 尺度 Token
+
+* **圆角** `RADIUS`：`xs 4 → sm 6 → md 7 → lg 10 → xl 12 → popup 16 → dock 18 → card 22`。
+  按钮/输入框用 `md`，卡片/列表用 `lg`，玻璃卡片用 `card`。历史别名
+  `RADIUS_SMALL`（=7）和 `GLASS_RADIUS`（=22）还在。
+* **阴影** `SHADOW`：`sm / md / lg` 三档（`blur / dx / dy / alpha`）。
+  ⚠️ QSS **没有** `box-shadow`，所以阴影走 `theme.drop_shadow(widget, "md")`
+  → `QGraphicsDropShadowEffect`，参数统一从 token 取。
+* **控件高度** `CONTROL`：按钮 / 输入框 / 下拉框共用 `min_height: 20px` +
+  `padding: 7px` + `1px` 边框 = **36px**，三者自然高度**完全一致**。
+* **字号** `FONT_SIZE`：`xs 8.25 → sm 9 → base 9.75 → md 11 → close 11.25 →
+  lg 12.75 → xl 16.5`（**全部 pt**，跟随系统 DPI）。
+* **字重** `FONT_WEIGHT`：`regular 400 / medium 500 / semibold 600 / bold 700`。
+* **动画时长** `DURATION`：`fast 120 / normal 180 / slow 260 / settle 60 /
+  tick 16 / highlight 1200`（毫秒）。Qt 的 QSS 没有 `transition`，这些值给
+  代码里的 `QTimer` 用；弹簧本身的手感在 `springs.py`。
+
+### 统一的组件
+
+| 组件 | 选择器 | 三态 |
+| --- | --- | --- |
+| Button | `QPushButton` + `#Primary` / `#Soft` / `#Danger` / `#Ghost` / `QToolButton` | hover / pressed / **focus** / disabled |
+| Input | `QLineEdit` / `QTextEdit` / `QComboBox` / `#Search` | focus / hover / disabled |
+| Checkbox | `QCheckBox::indicator` | hover / checked / disabled |
+| Tab | `QTabBar::tab` / `QTabWidget::pane` | hover / selected / disabled |
+| Card | `#Card` / `#Panel` / `#MainCard` | — |
+| Tooltip | `QToolTip` | — |
+| Toast | `#Toast` / `#ToastOk` / `#ToastWarn` / `#ToastDanger` | — |
+| Dialog | `QMessageBox` / `QMessageBox QLabel` / `QMessageBox QPushButton` | — |
+| Menu | `QMenu` / `QMenu::item` / `QMenu::separator` | selected / disabled |
+
+Tooltip 和 Toast 共用一套"反色药丸"配色（`toast_bg` / `toast_text`），
+浅色主题下是深底浅字，深色 / 玻璃下是深灰底浅字，两种主题都够醒目。
+
+### 设计方向（不要改）
+
+深色 / 半透明 / 圆角 / 蓝紫强调 ——「现代 Windows 桌面工具」，
+克制、高级、安静。**不做**赛博朋克、游戏 UI、大面积霓虹、过度玻璃与渐变。
+
+### 改样式时要注意的三件事
+
+1. **玻璃规则块必须留在样式表最后**。放在中间的话，后面那些
+   `#Popup { background: … }` 之类的普通规则会把玻璃规则盖掉 ——
+   玻璃看起来"没生效"，其实是被后写的规则赢了。
+2. **字号一律用 pt**，不要写 px（`test_round3` 和 `test_theme_tokens` 都会拦）。
+   px 字号在高 DPI 屏上不跟着缩放，字会小一圈。
+3. **不要在界面文件里另写色号 / 圆角 / 时长**。都从 `theme` 取，
+   `test_theme_tokens.py` 第 10 节会扫描 `dock.py` / `desktop_browser.py` /
+   `widgets.py`，发现残留的硬编码就报错。
+
+---
+
 ## 底部菜单栏（Dock）
 
 ![底部菜单栏](shots/dock.png)
@@ -202,6 +291,7 @@
 | **右下角的「加为常用」点了完全没反应**（而且「还原到桌面」也一样） | `QPushButton.clicked` 的签名是 `clicked(bool checked = False)`，它会把那个 bool **真的**传进槽函数。`add_selected_to_apps(self, item=None)` 带默认参数，PyQt 就认为"它还能再收一个"，于是把 `False` 当 `item` 塞进去 → `False.path` → AttributeError。**PyQt6 里槽函数中逃出去的异常会直接 abort 整个进程**：没有报错、没有弹窗，用户看到的就是"点了没反应" | 连接时套一层 `lambda _checked=False: ...` 把那个 bool 吃掉。详见「`clicked` 会偷偷塞一个 bool 进来」一节 |
 | **那个按钮还写死叫「加为常用」** | 文案是建按钮时定死的，跟"选中了什么"无关 | `_update_buttons()` 按 `cfg.is_quick(选中项)` 改文案与 tooltip，点下去执行对应的加 / 移 |
 | **右键菜单里没有删除，也没法清掉收纳目录里的东西** | 老代码**完全没有**删除路径（"只搬不删"），但用户确实需要一个"真的不要了"的出口 | 新增 `recycle.py`：右键 →「删除（移到回收站）」，走 Shell 的 `SHFileOperationW + FOF_ALLOWUNDO`（和资源管理器按 Delete 是同一条路径，**可还原**）。详见「删除到回收站」一节 |
+| **各处颜色 / 圆角 / 字号 / 时长各写各的**（圆角这里 9px 那里 10px、下拉框比按钮矮 2px、浅色主题下树控件完全没有样式） | 配色和 QSS 虽然已经集中在 `theme.py`，但只有一层**扁平色号**，没有语义层也没有尺度层；界面文件里还散着内联圆角（`border-radius: 10px`）和写死的定时器间隔 | Phase 1：把 `theme.py` 重构成**三层 Design Token**（语义色彩 token → 尺度 token → 由前者展开的扁平色板，历史短名照旧可用）；九类组件补齐 `hover / focus / disabled` 三态并新增 `#Toast`；散落的硬编码色号 / 圆角 / 时长全部收编（`FILE_TYPE_COLORS` / `RADIUS` / `DURATION`）。详见「视觉系统（Design Token）」一节 |
 
 > 顺带修掉一个潜在泄漏：`rebuild()` 每次都 `main_row.addStretch(1)`，
 > 但清场时只摘控制按钮，**弹性占位项会越积越多**——每个都要占一份 spacing，
@@ -882,7 +972,7 @@ desktop-nest\
 ├── icons.py                Windows Shell 图标提取 + 缓存（32px 档 / 256px 高清档）
 ├── textutil.py             模糊搜索与高亮区间
 ├── widgets.py              共用零件：图标加载器、应用图标、`GlassCardMixin`（两张玻璃卡片共用外观）
-├── theme.py                配色与整份 QSS（含 `GLASS` 玻璃配色）
+├── theme.py                **视觉 Design System**：语义色彩 Token + 尺度 Token（圆角/阴影/控件高度/字号/时长）+ 整份 QSS
 ├── qt_compat.py            Qt 加载器（自带 libs 优先）
 ├── setup_libs.py           直接下载解包 PyQt6（pip 不可用时的备用方案）
 ├── 桌面收纳.spec            PyInstaller 打包脚本（见文末「打包成 exe」）
@@ -1071,7 +1161,7 @@ py -3.14 dev\make_release.py --no-build         :: 跳过打包，只重新压�
 **推荐：一键跑完全部**
 
 ```bat
-python dev\run_all.py              :: 自动挑一个能加载 PyQt6 的解释器，十六套依次跑完并汇总
+python dev\run_all.py              :: 自动挑一个能加载 PyQt6 的解释器，十七套依次跑完并汇总
 python dev\run_all.py --list       :: 只列出会跑哪些用例
 python dev\run_all.py --shots      :: 顺带让 test_nest 把界面截图存到 shots\
 python dev\run_all.py --python <解释器路径>   :: 手动指定解释器
@@ -1099,9 +1189,10 @@ python dev\test_round4.py        :: 启动时序取图标 / 取图那刻现算�
 python dev\test_round5.py        :: 图标显示不完整：贴边图向外补余量 / 居中图照旧裁剪 / 幂等 / 缩到显示尺寸仍有余量（22）
 python dev\test_round6.py        :: 按钮不再崩 / 文案随选中项切换 / 选中态留得住 / 右键删除到回收站（三层取证 + 返回码不可信）/ guard 闸门 / 铁律 AST 检查（63）
 python dev\test_release.py       :: 打包自检：冻结环境下的自启命令与程序目录 / spec 的关键设置 / 新模块能被静态分析到 / 发行说明 / 压缩包结构（47）
+python dev\test_theme_tokens.py  :: 视觉设计系统：三套语义 Token 齐备 / 与扁平色板逐键一致 / 九类组件规则 + 三态齐备 / 字号全 pt / 对比度达标 / 实测按钮·输入框·下拉框一样高 / 界面文件无硬编码（98）
 ```
 
-十六套共 **760 项检查**，都只在临时沙盒目录里操作，**不会碰真实桌面**。
+十七套共 **854 项检查**，都只在临时沙盒目录里操作，**不会碰真实桌面**。
 `--shots` 会把界面截图存到 `shots\`。
 
 > `test_round4.py` 的项数会在 **47 ~ 49** 之间浮动：它有一条"本环境允不允许建本地套接字"

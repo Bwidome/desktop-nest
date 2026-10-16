@@ -42,10 +42,10 @@ try:
     )
     from PyQt6.QtWidgets import (  # noqa: F401
         QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
-        QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
-        QListWidgetItem, QMenu, QMessageBox, QPushButton, QScrollArea,
-        QSystemTrayIcon, QTabWidget, QToolButton, QTreeWidget, QTreeWidgetItem,
-        QVBoxLayout, QWidget,
+        QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QInputDialog,
+        QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
+        QPushButton, QScrollArea, QSystemTrayIcon, QTabWidget, QToolButton,
+        QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
     )
 
     BACKEND = "PyQt6"
@@ -65,10 +65,10 @@ except ImportError as exc:  # pragma: no cover
         )
         from PySide6.QtWidgets import (  # type: ignore  # noqa: F401
             QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
-            QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
-            QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton,
-            QScrollArea, QSystemTrayIcon, QTabWidget, QToolButton, QTreeWidget,
-            QTreeWidgetItem, QVBoxLayout, QWidget,
+            QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QInputDialog,
+            QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
+            QPushButton, QScrollArea, QSystemTrayIcon, QTabWidget, QToolButton,
+            QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
         )
 
         BACKEND = "PySide6"

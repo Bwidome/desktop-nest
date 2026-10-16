@@ -55,8 +55,9 @@ import nest
 import recycle
 import theme as theme_mod
 from textutil import fuzzy_match
-from widgets import (GlassCardMixin, IconLoader, PLACEHOLDER_COLORS, app_icon,
-                     icon_hint_for, letter_pixmap, multi_pick, pixmap_for)
+from widgets import (FALLBACK_TILE_COLOR, GlassCardMixin, IconLoader,
+                     PLACEHOLDER_COLORS, app_icon, icon_hint_for, letter_pixmap,
+                     multi_pick, pixmap_for)
 
 GRID_ICON = 40                 # 网格里的图标显示尺寸（原来 48，偏大）
 ICON_REQUEST = 64              # 向 Windows 要更大的图标再缩，清晰得多
@@ -156,7 +157,8 @@ class ItemTile(QFrame):
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.icon_label.setFixedHeight(GRID_ICON + 4)
         self.icon_label.setPixmap(
-            letter_pixmap(display, PLACEHOLDER_COLORS.get(item.kind, "#94A3B8"),
+            letter_pixmap(display, PLACEHOLDER_COLORS.get(item.kind,
+                                                          FALLBACK_TILE_COLOR),
                           GRID_ICON))
         layout.addWidget(self.icon_label)
 
@@ -188,9 +190,10 @@ class ItemTile(QFrame):
         c = self.p
         bg = c["accent_soft"] if self.selected else "transparent"
         border = c["accent"] if self.selected else "transparent"
+        # 圆角走 Design Token，别在这里另写一个数字
         self.setStyleSheet(
             f"#FileTile {{ background: {bg}; border: 1px solid {border};"
-            f" border-radius: 10px; }}")
+            f" border-radius: {theme_mod.RADIUS['lg']}px; }}")
         self.name_label.setStyleSheet(
             f"color: {c['accent'] if self.selected else c['text']};")
 
@@ -325,7 +328,8 @@ class QuickDropHost(QWidget):
         if active:
             self.setStyleSheet(
                 f"#QuickDropHost {{ border: 1px dashed {c['accent']};"
-                f" border-radius: 10px; background: {c['accent_soft']}; }}")
+                f" border-radius: {theme_mod.RADIUS['lg']}px;"
+                f" background: {c['accent_soft']}; }}")
         else:
             self.setStyleSheet("")
         self.update()
@@ -422,7 +426,7 @@ class DesktopBrowser(GlassCardMixin, QWidget):
 
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
-        self._search_timer.setInterval(120)
+        self._search_timer.setInterval(theme_mod.DURATION["fast"])   # 搜索防抖
         self._search_timer.timeout.connect(self._rebuild)
 
         # 把条目**打开**之后，延迟一小会儿把高亮清掉（不是"单击就清"）。
@@ -430,7 +434,7 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         # 才有得点。
         self._highlight_timer = QTimer(self)
         self._highlight_timer.setSingleShot(True)
-        self._highlight_timer.setInterval(1200)
+        self._highlight_timer.setInterval(theme_mod.DURATION["highlight"])
         self._highlight_timer.timeout.connect(self.clear_selection)
 
         # 图标加载器必须在 _build_ui() **之前**建好：

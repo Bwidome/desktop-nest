@@ -24,17 +24,15 @@ import engine
 import icons
 import theme
 
-# 每种类型没有真实图标时的占位色
-PLACEHOLDER_COLORS = {
-    "shortcut": "#4F6BED", "program": "#5B6B8C", "image": "#E09A3E",
-    "video": "#8B5CF6", "audio": "#E0559A", "document": "#4F6BED",
-    "sheet": "#12A150", "slide": "#D9634F", "archive": "#0EA5E9",
-    "code": "#14B8A6", "font": "#A855F7", "folder": "#E3B341", "other": "#94A3B8",
-    "desktop": "#4F6BED",
-}
+# 每种类型没有真实图标时的占位色。
+# 色值本体已经收进 `theme.FILE_TYPE_COLORS`（和品牌主色同一份 Design Token），
+# 这里只是转出来给调用方用，不再在界面文件里各写一遍色号。
+PLACEHOLDER_COLORS = theme.FILE_TYPE_COLORS
+# 取不到类型时的兜底色
+FALLBACK_TILE_COLOR = theme.FALLBACK_TILE_COLOR
 
 # 品牌主色统一从主题取，避免同一串色值散落在多个文件里各写一遍
-BRAND_ACCENT = theme.LIGHT["accent"]
+BRAND_ACCENT = theme.BRAND_ACCENT
 
 
 def letter_pixmap(text: str, color: str, size: int) -> QPixmap:

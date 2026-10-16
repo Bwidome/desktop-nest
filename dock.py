@@ -58,8 +58,8 @@ import nest
 import safety
 import springs
 import theme as theme_mod
-from widgets import (IconLoader, PLACEHOLDER_COLORS, app_icon, clear_hover,
-                     letter_pixmap, multi_pick)
+from widgets import (FALLBACK_TILE_COLOR, IconLoader, PLACEHOLDER_COLORS,
+                     app_icon, clear_hover, letter_pixmap, multi_pick)
 
 DOCK_ICON_SIZES = [36, 44, 52, 60]
 DEFAULT_ICON_SIZE = 44
@@ -469,13 +469,13 @@ class DockBar(QWidget):
         # PreciseTimer：默认的 CoarseTimer 在 Windows 上精度只有 ~15ms，
         # 60fps 的节拍会被拖成忽快忽慢，弹簧看起来就"顿顿的"。
         self._anim_timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self._anim_timer.setInterval(16)          # ≈60fps
+        self._anim_timer.setInterval(theme_mod.DURATION["tick"])   # ≈60fps
         self._anim_timer.timeout.connect(self._on_anim_tick)
 
         # 布局稳定后校正位置用的短定时器（见 _settle）
         self._settle_timer = QTimer(self)
         self._settle_timer.setSingleShot(True)
-        self._settle_timer.setInterval(60)
+        self._settle_timer.setInterval(theme_mod.DURATION["settle"])
         self._settle_timer.timeout.connect(self._settle)
 
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint |
@@ -763,7 +763,8 @@ class DockBar(QWidget):
         button._payload = payload                      # noqa: SLF001
         if force_icon is None:
             icon = QIcon(letter_pixmap(
-                fallback_text, PLACEHOLDER_COLORS.get(fallback_kind, "#94A3B8"),
+                fallback_text,
+                PLACEHOLDER_COLORS.get(fallback_kind, FALLBACK_TILE_COLOR),
                 icon_size))
         elif isinstance(force_icon, QIcon):
             icon = force_icon
