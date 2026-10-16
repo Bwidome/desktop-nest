@@ -266,13 +266,15 @@ def main() -> int:
     check("release/使用说明.txt 存在", readme.is_file(), str(readme))
     if readme.is_file():
         text = readme.read_text(encoding="utf-8")
-        check("写的是 v0.2", "v0.2" in text, "")
+        check("写的是 v0.3", "v0.3" in text, "")
         check("讲清了「别只拖 exe，要带上 _internal」",
               "_internal" in text)
         check("讲清了删除是删到回收站、可还原",
               "回收站" in text and "还原" in text)
         check("讲清了底部按钮随选中项变（加为常用 / 移出常用）",
               "加为常用" in text and "移出常用" in text)
+        check("讲清了长按拖动排序（弹簧让位）",
+              "排序" in text and "让位" in text)
         check("给了 --selftest 与 --restore 两条应急命令",
               "--selftest" in text and "--restore" in text)
 

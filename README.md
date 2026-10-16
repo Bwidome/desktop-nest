@@ -1035,8 +1035,8 @@ pyinstaller 桌面收纳.spec --noconfirm
 还得改名、补说明、压缩。这三步合并成了一条命令：
 
 ```bat
-py -3.14 dev\make_release.py                    :: 默认 v0.2
-py -3.14 dev\make_release.py --version v0.3     :: 换版本号
+py -3.14 dev\make_release.py                    :: 默认 v0.3
+py -3.14 dev\make_release.py --version v0.4     :: 换版本号
 py -3.14 dev\make_release.py --no-build         :: 跳过打包，只重新压缩
 ```
 
@@ -1046,7 +1046,7 @@ py -3.14 dev\make_release.py --no-build         :: 跳过打包，只重新压�
 | --- | --- | --- |
 | 1. 打包 | 用 `桌面收纳.spec` 跑 PyInstaller（onedir） | 所有关键设置都在 spec 里，别手敲 |
 | 2. 整理 | `桌面收纳.exe` → **`DesktopNest.exe`**，再把 `release\使用说明.txt` 拷进去 | exe 的图标 / 清单 / 版本资源都是内嵌的，改名不会丢；老用户的快捷方式也还能用 |
-| 3. 压缩 | 把产物目录**里面的内容**打进 `desktop-nest-release-v0.2.zip` | 解压后根目录直接是 `DesktopNest.exe` + `_internal` + `使用说明.txt`，**双击就能用**，不用再进一层目录 |
+| 3. 压缩 | 把产物目录**里面的内容**打进 `desktop-nest-release-v0.3.zip` | 解压后根目录直接是 `DesktopNest.exe` + `_internal` + `使用说明.txt`，**双击就能用**，不用再进一层目录 |
 
 > **为什么构建到 `.tmp\release-build\` 而不是 `dist\`**
 > `dist\` 里躺着上一次的产物时，PyInstaller 的 `--noconfirm` 会**先把它删掉**；
@@ -1098,10 +1098,10 @@ python dev\test_nest.py --shots  :: 收纳主流程 / 两个桌面 / 分页 / �
 python dev\test_round4.py        :: 启动时序取图标 / 取图那刻现算路径 / 失败重试 / 高清 .lnk hint / 单实例（互斥体·跨进程·叫醒·自检让路）（47）
 python dev\test_round5.py        :: 图标显示不完整：贴边图向外补余量 / 居中图照旧裁剪 / 幂等 / 缩到显示尺寸仍有余量（22）
 python dev\test_round6.py        :: 按钮不再崩 / 文案随选中项切换 / 选中态留得住 / 右键删除到回收站（三层取证 + 返回码不可信）/ guard 闸门 / 铁律 AST 检查（63）
-python dev\test_release.py       :: 打包自检：冻结环境下的自启命令与程序目录 / spec 的关键设置 / 新模块能被静态分析到 / 发行说明 / 压缩包结构（41）
+python dev\test_release.py       :: 打包自检：冻结环境下的自启命令与程序目录 / spec 的关键设置 / 新模块能被静态分析到 / 发行说明 / 压缩包结构（47）
 ```
 
-十六套共 **754 项检查**，都只在临时沙盒目录里操作，**不会碰真实桌面**。
+十六套共 **760 项检查**，都只在临时沙盒目录里操作，**不会碰真实桌面**。
 `--shots` 会把界面截图存到 `shots\`。
 
 > `test_round4.py` 的项数会在 **47 ~ 49** 之间浮动：它有一条"本环境允不允许建本地套接字"
