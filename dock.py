@@ -23,8 +23,14 @@
 ----------
     · 点图标                → 启动
     · 按住任意位置**拖**    → 整条菜单栏沿屏幕底边左右移动（位置记在 dock_x）
-    · 在常用软件上**长按**再拖 → 手动排序（有插入指示线，松手即生效）
+    · 在常用软件上**长按**再拖 → 手动排序（图标跟手 + 别的图标弹开让位）
     · 右键                  → 菜单栏设置
+
+手动排序是**弹簧动画**的（见 `springs.py`）：
+按住不动 0.32 秒进入排序模式，被拖的那个图标脱离槽位、跟着光标走，
+其余图标用弹簧朝各自的新槽位弹过去（略微过冲，像被挤开的）；松手后
+被拖的图标自己弹回最终槽位，然后才把控制权交回布局。
+细节与踩过的坑见 `_update_reorder` / `_finish_settle` 的注释。
 
 外观：**纯透明的浮层**——没有底板，只有「桌面整理」控件和常用软件的图标
 浮在桌面上，见 theme 里的 `#DockSurface`。
@@ -37,6 +43,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from qt_compat import (
@@ -49,6 +56,7 @@ from qt_compat import (
 import engine
 import nest
 import safety
+import springs
 import theme as theme_mod
 from widgets import (IconLoader, PLACEHOLDER_COLORS, app_icon, clear_hover,
                      letter_pixmap, multi_pick)
@@ -56,6 +64,18 @@ from widgets import (IconLoader, PLACEHOLDER_COLORS, app_icon, clear_hover,
 DOCK_ICON_SIZES = [36, 44, 52, 60]
 DEFAULT_ICON_SIZE = 44
 MIN_MARGIN = 8
+
+# --------------------------------------------------------------------------
+# 排序让位的弹簧手感（积分器在 springs.py）
+# --------------------------------------------------------------------------
+#: 让位的那些图标：略欠阻尼 —— 会轻轻过冲一点点再停住，就是"被挤开"的观感。
+#: 刚度 340 → ω≈18.4 rad/s，settle 时间 ≈ 4/(0.8·18.4) ≈ 0.27s，干脆利落。
+REORDER_SPRING = {"stiffness": 340.0, "ratio": 0.80}
+
+#: 被拖的那个图标：临界阻尼 + 大刚度 —— 紧紧跟手，但**绝不过冲**，
+#: 否则拖拽时图标会在光标前后晃，看起来就是"抖"。
+#: 刚度 2600 → ω≈51 rad/s，跟随延迟 ≈ 60ms，肉眼几乎察觉不到。
+DRAGGED_SPRING = {"stiffness": 2600.0, "ratio": 1.0}
 
 # 「桌面整理」这个矢量图标要预先画成多少档位，供 Qt 按需挑
 GLYPH_SIZES = (16, 24, 32, 48, 64, 96, 128, 192, 256)
@@ -141,6 +161,27 @@ class FlowRow(QWidget):
 
     def item_count(self) -> int:
         return len(self._items)
+
+    def reorder(self, ordered: "list[QWidget]") -> bool:
+        """按 `ordered` 给出的顺序重排**已有**条目（不销毁、不新建控件）。
+
+        拖动排序提交后要立刻把视觉顺序固定下来，但**不能重建控件**——
+        重建会让所有图标消失一帧再出现，回弹动画也白做了。
+        所以这里只改 `_items` 的顺序，等动画停下来 `relayout()` 一跑，
+        布局自然就按新顺序摆。返回是否真的改了。
+
+        ⚠️ 只接受"现有条目的一个排列"：数量或成员对不上就整个拒绝，
+        免得把布局搞成半新半旧的状态。
+        """
+        ordered = list(ordered)
+        if len(ordered) != len(self._items):
+            return False
+        if sorted(map(id, ordered)) != sorted(map(id, self._items)):
+            return False
+        if ordered == self._items:
+            return False
+        self._items = ordered
+        return True
 
     def _effective_size(self, widget: QWidget) -> "QSize":
         """控件在布局里**实际**会占的尺寸。
@@ -410,6 +451,27 @@ class DockBar(QWidget):
         self._release_pos: "QPoint | None" = None
         self._drop_line: "QFrame | None" = None
 
+        # ---- 弹簧让位动画（见文件头「手动排序是弹簧动画的」） ----
+        # 每个按钮一个 SpringPoint；位置**由弹簧驱动**，不再由布局驱动。
+        self._springs: "dict[DockIcon, springs.SpringPoint]" = {}
+        # 拖拽开始时冻结下来的槽位坐标 `[(x, y), ...]`（apps_flow 坐标系）。
+        # **整个拖拽过程都不变** —— 这是"不抖"的关键，理由见 _update_reorder。
+        self._slots: "list[tuple[float, float]]" = []
+        self._reorder_button: "DockIcon | None" = None
+        # 按下时光标在按钮内部的相对位置，拖动时用它让图标"跟着手"而不是跳到光标中心
+        self._grab_offset = QPoint(0, 0)
+        # 松手之后是否还在回弹。为真时**不许**重排布局，否则会把动画打断
+        self._settling = False
+        # 排序改了顺序，但**通知外部要等回弹结束**。理由见 `_commit_reorder`。
+        self._pending_quick_notify = False
+        self._anim_last = 0.0
+        self._anim_timer = QTimer(self)
+        # PreciseTimer：默认的 CoarseTimer 在 Windows 上精度只有 ~15ms，
+        # 60fps 的节拍会被拖成忽快忽慢，弹簧看起来就"顿顿的"。
+        self._anim_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._anim_timer.setInterval(16)          # ≈60fps
+        self._anim_timer.timeout.connect(self._on_anim_tick)
+
         # 布局稳定后校正位置用的短定时器（见 _settle）
         self._settle_timer = QTimer(self)
         self._settle_timer.setSingleShot(True)
@@ -470,6 +532,9 @@ class DockBar(QWidget):
 
     def _clear_row(self) -> None:
         """清空应用区与控制按钮。"""
+        # 先停弹簧动画：下面这些按钮马上就被销毁了，
+        # 定时器里还留着它们的引用就会去 move() 已删除的对象。
+        self._abort_reorder_anim()
         self.hide_drop_line()
         self.apps_flow.clear_items()
         for button in self._control_buttons:
@@ -652,8 +717,12 @@ class DockBar(QWidget):
         # 先让应用区按可用宽度决定每行放几个（放不下就换行，而不是被挤扁）。
         # 控制按钮现在和图标同处一行，所以要把它们占的宽度先扣掉，
         # 否则应用区会按"整行都归我"来排，把 ＋ ⚙ ✕ 挤出屏幕外面。
-        inner = max_width - (MIN_MARGIN * 2) - 20 - self._controls_width()
-        self.apps_flow.relayout(max(160, inner))
+        #
+        # ⚠️ 拖拽排序期间**绝对不许** relayout：它会把每个按钮按网格重新摆一遍，
+        #    正在进行的弹簧动画会瞬间被"位置重置"（就是用户说的"拖到一半跳回去"）。
+        if not self._reorder_locked():
+            inner = max_width - (MIN_MARGIN * 2) - 20 - self._controls_width()
+            self.apps_flow.relayout(max(160, inner))
 
         self.adjustSize()
         width = min(self.sizeHint().width(), max_width)
@@ -672,6 +741,10 @@ class DockBar(QWidget):
         * 窗口显示后 Qt 还会按布局再调一次尺寸；不在这之后贴底，
           菜单栏就会有一部分探到屏幕下面去（之前"加完常用项跑到桌面外"的原因）。
         """
+        # 拖拽 / 回弹期间让路：这个定时器是**异步**的，很容易正好在拖动中途
+        # 触发，然后把按钮全部按网格重摆一遍 —— 动画就此被打断。
+        if self._reorder_locked():
+            return
         self._resize_to_content()
         self.reposition()
 
@@ -1043,17 +1116,38 @@ class DockBar(QWidget):
         self._drag_offset = None
 
     def _on_icon_hold(self, button: DockIcon, global_pos: QPoint) -> None:
-        """长按到点：如果按的是常用软件，就进入排序模式。"""
+        """长按到点：如果按的是常用软件，就进入排序模式。
+
+        进入的这一刻要把"基准"一次性固定下来（要求 9：只动排序相关的代码，
+        但基准必须干净）：
+          * `_snapshot_slots()` 冻结每个槽位的坐标，整场拖拽都不再变；
+          * `_ensure_springs()` 给每个按钮配一个弹簧；
+          * 被拖的那个**脱离槽位**（换成"跟手"的硬弹簧），之后只跟光标；
+          * 记下光标在按钮内部的相对位置，图标才是"跟着手"而不是跳到光标中心。
+        """
         if self._press_icon is not button or self._mode:
             return
         if self._app_index(button) < 0:
             return                      # 「桌面整理」入口不参与排序
         self._mode = "reorder"
+        self._reorder_button = button
         button.set_dragging(True)
         button.setDown(True)            # 按住的样子，提示"已经抓起来了"
         button.setCursor(Qt.CursorShape.ClosedHandCursor)
         self._reorder_from = self._app_index(button)
         self._reorder_to = self._reorder_from
+        self._settling = False
+
+        self._snapshot_slots()
+        self._ensure_springs()
+        # 被拖的那个：脱离槽位、贴到它现在实际所在的位置，之后只跟光标走。
+        # 刚度拉到 2600 + 临界阻尼 → 紧紧跟手，且**绝不过冲**（过冲就是"抖"）。
+        spring = self._springs[button]
+        spring.tune(**DRAGGED_SPRING)
+        spring.snap(*self._slots[self._reorder_from])
+        self._grab_offset = global_pos - button.mapToGlobal(QPoint(0, 0))
+        # 抓到最上层：不然它会从相邻图标下面穿过去
+        button.raise_()
         self._drop_line_widget()
 
     def _on_icon_move(self, button: DockIcon, global_pos: QPoint) -> None:
@@ -1097,6 +1191,193 @@ class DockBar(QWidget):
         except ValueError:
             return -1
 
+    # ------------------------------------------------------------------
+    # 弹簧让位动画（核心，见文件头「手动排序是弹簧动画的」）
+    #
+    # 老实现是"瞬移"：`_apply_reorder_shift()` 里直接 `button.move(x + offset, y)`，
+    # 一帧到位；松手再 `rebuild()` 把按钮全销毁重建。三个问题：
+    #   1. 让位没有过渡，看着像闪一下；
+    #   2. rebuild() 让所有图标消失一帧；
+    #   3. 松手前的视觉顺序和松手后的布局是两套东西，对不齐。
+    # 现在改成：位置**由弹簧驱动**（springs.py），布局只负责提供"槽位坐标"，
+    # 等动画停下来再一次性把控制权交回布局。
+    # ------------------------------------------------------------------
+    def _reorder_locked(self) -> bool:
+        """排序动画期间为 True：这段时间**禁止**重排布局。
+
+        为什么必须有个闸门：`relayout()` 会把每个按钮按网格重新摆一遍。
+        拖动过程中一旦被它插一脚，弹簧刚算好的位置就被"位置重置"了 ——
+        用户看到的就是"拖到一半跳回去 / 抖一下"。
+        有两条路径会走到那儿：
+          * `_resize_to_content()`（由 `refit()` 和 `_settle()` 调）；
+          * `_settle_timer`（60ms 后异步触发，很容易正好落在拖动中间）。
+        """
+        return self._mode == "reorder" or self._settling
+
+    def _start_anim(self) -> None:
+        """起 60fps 的推进定时器。
+
+        ⚠️ 已经在跑时**绝不能**重置 `_anim_last`。`pointermove` 的频率可能
+        比 16ms 高得多（高回报率鼠标可以到 125~1000Hz），每次都重置的话，
+        每一拍算出来的 `dt` 只有一两毫秒，弹簧被推进得奇慢 ——
+        表现就是"拖起来黏黏的、像慢动作"。时间基准只归定时器自己管。
+        """
+        if self._anim_timer.isActive():
+            return
+        self._anim_last = time.monotonic()
+        self._anim_timer.start()
+
+    def _abort_reorder_anim(self) -> None:
+        """立刻丢掉整场排序动画（清空按钮 / 重建时调）。
+
+        ⚠️ 顺序很重要：**先清弹簧表再让按钮被销毁**。定时器回调里攥着
+        按钮引用，晚一步清的话下一拍就会去 `move()` 一个已经被
+        `deleteLater()` 的对象。
+        """
+        self._anim_timer.stop()
+        self._springs.clear()
+        self._slots = []
+        self._reorder_button = None
+        self._settling = False
+        if self._mode == "reorder":
+            self._mode = ""
+        if self._pending_quick_notify:
+            # 回弹被别的事情打断了（多半是别处触发了一次 rebuild）。
+            # 顺序早就写进配置了，但"常用软件变了"这个消息还没发出去；
+            # 挪到下一个事件循环再发，免得在别人的 rebuild 调用栈里再套一层。
+            self._pending_quick_notify = False
+            QTimer.singleShot(0, self.quick_changed.emit)
+
+    def _ensure_springs(self) -> None:
+        """保证每个常用项按钮都有一个 SpringPoint，且不多不少。
+
+        每个按钮一个**二维**弹簧（x / y 各自独立积分），位置由它驱动、
+        不再由布局驱动 —— 这就是"让位是弹过去的、不是瞬移"的来源。
+        """
+        live = {id(b) for b in self._app_buttons}
+        for button in list(self._springs):
+            if id(button) not in live:
+                del self._springs[button]
+        for button in self._app_buttons:
+            point = self._springs.get(button)
+            if point is None:
+                point = springs.SpringPoint(float(button.x()), float(button.y()))
+                self._springs[button] = point
+            # 让位的那些统一用略欠阻尼的手感：会轻轻过冲一点点再停住
+            point.tune(**REORDER_SPRING)
+
+    def _snapshot_slots(self) -> None:
+        """把当前每个常用项按钮的位置**冻结**成"槽位"，整场拖拽都不再变。
+
+        这是"不抖"最关键的一步。让位的目标必须来自一份**不动的**基准：
+        如果拿按钮的实时位置去算（旧实现就是 `button.x() + offset`），
+        按钮被弹簧推着走 → 下一拍算出的基准也跟着变 → 目标又变 →
+        整个界面自己跟自己较劲，表现就是抖动 / 漂移。
+        冻结之后 `_slots[i]` 永远是"第 i 个槽位在哪"，与此刻谁坐在上面无关。
+        """
+        self._slots = [(float(b.x()), float(b.y())) for b in self._app_buttons]
+
+    def _slot_centers(self) -> "list[int]":
+        """各槽位中心的**屏幕横坐标**（用冻结的槽位算，不用按钮当前位置）。"""
+        origin = self.apps_flow.mapToGlobal(QPoint(0, 0)).x()
+        return [origin + int(slot[0]) + self._app_buttons[index].width() // 2
+                for index, slot in enumerate(self._slots)]
+
+    def _target_index(self, cursor_x: int) -> int:
+        """光标落在哪个槽位 —— 判据是"离哪个槽位中心最近"。
+
+        等价于"跨过相邻图标的中心线就换位"（要求 3）。
+        每次都用**光标的绝对位置**重新算，而不是"相对上次挪了几格"：
+        快速拖动时一个事件可能跨过好几个图标，增量式算法会漏掉中间状态，
+        这里不会有这个问题（要求 8）。
+        """
+        centers = self._slot_centers()
+        if not centers:
+            return 0
+        return min(range(len(centers)), key=lambda i: abs(cursor_x - centers[i]))
+
+    def _order_after_reorder(self) -> "list[int]":
+        """把 `src → dst` 摊成"槽位 → 原下标"的映射。
+
+        语义与 `Config.move_to()` **完全一致**（`items.insert(dst, items.pop(src))`），
+        所以视觉顺序和写回配置的顺序不可能对不上。
+        `order[p]` = "第 p 个槽位由原来的第几个图标来坐"。
+        """
+        count = len(self._app_buttons)
+        order = list(range(count))
+        if 0 <= self._reorder_from < count:
+            order.insert(self._reorder_to, order.pop(self._reorder_from))
+        return order
+
+    def _settle_targets(self) -> "dict[DockIcon, int]":
+        """当前排列下，每个按钮该去哪个槽位（槽位下标）。"""
+        order = self._order_after_reorder()
+        return {button: order.index(index)
+                for index, button in enumerate(self._app_buttons)}
+
+    def _on_anim_tick(self) -> None:
+        """每帧推进所有弹簧，并把结果落到控件上（≈60fps）。
+
+        高频 `pointermove` 只负责**改目标**（`move_to`），真正的位置计算
+        全挤在这一个定时器里 —— 一次事件风暴不会变成一次布局风暴。
+        这就是要求 5 里"用 rAF 优化高频 pointermove"的 Qt 版本。
+        """
+        now = time.monotonic()
+        dt = now - self._anim_last
+        self._anim_last = now
+        if dt <= 0.0:
+            return
+        try:
+            alive = [(b, p) for b, p in self._springs.items() if b.parent() is not None]
+        except RuntimeError:      # 按钮已经被销毁（极端时序），直接收摊
+            self._abort_reorder_anim()
+            return
+        moving = springs.advance([p for _b, p in alive], dt)
+        for button, point in alive:
+            # 要求 4 的 Qt 版：`transform: translate3d()` → `QWidget.move()`。
+            # **只在这一处取整**（唯一的位置来源），避免"取整"和"弹簧"来回打架。
+            button.move(int(round(point.x.value)), int(round(point.y.value)))
+        if not moving:
+            # 全部到位：停表省 CPU。下一次 move_to 会重新起表。
+            self._anim_timer.stop()
+            if self._settling:
+                self._finish_settle()
+
+    def _finish_settle(self) -> None:
+        """回弹结束：把控制权交回布局，并**零位移**地收尾。
+
+        交接顺序是精心排过的：
+          1. 先把顺序固定进 `apps_flow`（只改 `_items`，不销毁控件）；
+          2. 再 `relayout()` 一次，让布局按新顺序摆 —— 因为所有图标此刻
+             正好停在各自的槽位上，这一步算出来的坐标跟当前坐标**一样**，
+             所以肉眼看不到任何跳动；
+          3. 把弹簧的值 `snap()` 到布局的真实坐标上，然后整张弹簧表丢掉。
+             这样万一有 1px 的取整误差，也已经被"对齐"掉了，不会在
+             下一次 relayout 时突然抖一下；
+          4. **最后**才发 `quick_changed`。它会让 `tray_app` 调 `rebuild()`，
+             把图标全销毁重建 —— 但那会儿顺序和位置已经和配置一模一样，
+             重建只是换了批控件、落在同一批坐标上，看不出来。
+             反过来先发就会把正在回弹的按钮当场删掉（见 `_commit_reorder`）。
+        """
+        self._anim_timer.stop()
+        self._settling = False
+        self._reorder_button = None
+        # 顺序真的变了才重排；没变的话 relayout 纯属白干（还可能引入误差）
+        if self.apps_flow.reorder([self.desktop_btn] + list(self._app_buttons)):
+            self.apps_flow.relayout(self._reorder_span_width())
+            layout = self.apps_flow.layout()
+            if layout is not None:
+                layout.activate()
+        for button, point in self._springs.items():
+            point.snap(float(button.x()), float(button.y()))
+        self._springs.clear()
+        self._slots = []
+        self._resize_to_content()
+        self.reposition()
+        if self._pending_quick_notify:
+            self._pending_quick_notify = False
+            self.quick_changed.emit()
+
     # ---- 排序指示线 --------------------------------------------------
     def _drop_line_widget(self) -> QFrame:
         """插入位置的那根竖线（懒创建，挂在 surface 上浮着）。"""
@@ -1114,75 +1395,98 @@ class DockBar(QWidget):
         if self._drop_line is not None:
             self._drop_line.hide()
 
+    def _dragged_target(self, global_pos: QPoint) -> QPoint:
+        """被拖图标该去哪（`apps_flow` 坐标系）。
+
+        直接取"光标位置 − 抓取偏移"，图标就是**跟着手**走，而不是跳到光标中心。
+        最后夹在应用区矩形内：Qt 的子控件一律被父控件裁剪，放任它跑出去
+        就会缺一角（和之前修的"图标显示不完整"是同一类毛病）。
+        """
+        button = self._reorder_button
+        local = self.apps_flow.mapFromGlobal(global_pos - self._grab_offset)
+        if button is None:
+            return local
+        area = self.apps_flow.rect()
+        max_x = max(area.left(), area.right() + 1 - button.width())
+        max_y = max(area.top(), area.bottom() + 1 - button.height())
+        return QPoint(min(max(local.x(), area.left()), max_x),
+                      min(max(local.y(), area.top()), max_y))
+
     def _update_reorder(self, global_pos: QPoint) -> None:
-        """按光标位置算出目标槽位，把指示线画到那儿，并**让位**。
+        """按光标位置**实时**算目标槽位，并让其他图标弹开让位。
 
         需求 2：「长按拖动图标插入到某个位置时，后面的软件会自动后移」。
 
-        做法是"预留空位"：被拖的那个图标留在原位不动，其余图标按
-        「目标槽位」重新排 —— 视觉上就等于别的图标主动向两边让开，
-        松手后拖动的那个正好落进空出来的位置。
+        和旧实现的三点区别：
+          * 目标槽位用**冻结的槽位中心**判（旧实现用的是按钮实时中心，
+            按钮一动中心就动，判据自己跟自己较劲）；
+          * 让位只改弹簧目标，真实位置由 60fps 的 `_on_anim_tick()` 推 ——
+            平滑、有弹性，不再是"一帧瞬移"；
+          * 被拖的那个和让位的那些用**两套弹簧参数**，动画互相独立（要求 6）。
         """
         buttons = self._app_buttons
-        if len(buttons) < 2:
+        if len(buttons) < 2 or not self._slots:
             self.hide_drop_line()
             return
-        cursor_x = global_pos.x()
-        centers = [b.mapToGlobal(QPoint(b.width() // 2, 0)).x() for b in buttons]
-        target = min(range(len(buttons)), key=lambda i: abs(cursor_x - centers[i]))
-        self._reorder_to = target
-
-        # 先让位（不管指示线画不画，位置都要跟着更新）
+        # 要求 2：targetIndex 在 drag move 阶段就实时算出来，不等 mouseup
+        self._reorder_to = self._target_index(global_pos.x())
         self._apply_reorder_shift()
+        # 被拖的那个：目标每次跟着光标改，但**不重置速度**，所以运动是连续的
+        dragged = self._reorder_button
+        if dragged is not None:
+            point = self._springs.get(dragged)
+            if point is not None:
+                target = self._dragged_target(global_pos)
+                point.move_to(float(target.x()), float(target.y()))
+        self._start_anim()
+        self._update_drop_line()
 
-        if target == self._reorder_from:
+    def _update_drop_line(self) -> None:
+        """把插入指示线画到"松手后它会落到哪"。
+
+        位置取**冻结的槽位**而不是按钮当前位置：按钮正被弹簧推着走，
+        拿它当基准的话这根线会跟着晃。
+        """
+        target = self._reorder_to
+        if target == self._reorder_from or not self._slots \
+                or target >= len(self._slots):
             self.hide_drop_line()
             return
-
         line = self._drop_line_widget()
-        button = buttons[target]
-        corner = button.mapTo(self.surface, QPoint(0, 0))
-        # 往左移就画在目标槽的左边缘，往右移就画在右边缘——
-        # 这样线的位置就是"松手后它会落到哪"。
+        origin = self.apps_flow.mapTo(self.surface, QPoint(0, 0))
+        slot = self._slots[target]
+        button = self._app_buttons[target]
+        # 往左移就画在目标槽的左边缘，往右移就画在右边缘
         offset = -4 if target < self._reorder_from else button.width() + 1
-        line.setGeometry(corner.x() + offset, corner.y() + 3,
+        line.setGeometry(origin.x() + int(slot[0]) + offset,
+                         origin.y() + int(slot[1]) + 3,
                          4, max(8, button.height() - 6))
         line.raise_()
         line.show()
 
     def _apply_reorder_shift(self) -> None:
-        """把"让位"效果真的摆到界面上（纯视觉，不改配置）。
+        """把"让位"变成弹簧目标（纯视觉，不改配置）。
 
-        网格是按行铺的，但图标宽度一致，所以用**横向位移**模拟插入最直观：
+        做法是"预留空位"：按 `_order_after_reorder()` 算出最终排列，
+        每个让位的图标把弹簧目标改成**它在新排列里该坐的槽位**，
+        于是它自己弹过去 —— 视觉上就是"别的图标主动向两边让开"。
 
-        * 被拖的那个：不动（它自己会跟着光标走）；
-        * 夹在「原位置」和「目标位置」之间的那些：整体往反方向挪一格。
-
-        这样松手前就已经能看出"它会插到这里"，而不是只有一根指示线。
+        目标位置是**绝对坐标**（不是 `x + offset` 那种累加），所以同一个
+        状态重复调用多少次结果都一样，高频 `pointermove` 下不会漂移，
+        也不会因为"一次事件跨过好几个图标"而错位（要求 8）。
         """
-        buttons = self._app_buttons
-        src, dst = self._reorder_from, self._reorder_to
-        if not buttons or src == dst:
-            self._reset_reorder_shift()
+        if not self._slots:
             return
-        step = buttons[0].width() + self.apps_flow._spacing          # noqa: SLF001
-        if dst > src:
-            span = range(src + 1, dst + 1)
-            offset = -step
-        else:
-            span = range(dst, src)
-            offset = step
-        for index, button in enumerate(buttons):
-            if index == src:
-                continue                    # 被拖的自己走
-            button.move(button.x() + (offset if index in span else 0), button.y())
-
-    def _reset_reorder_shift(self) -> None:
-        """把让位造成的位移还原（松手 / 取消时调）。"""
-        try:
-            self.apps_flow.relayout(self._reorder_span_width())
-        except Exception:
-            pass
+        for button, slot_index in self._settle_targets().items():
+            if button is self._reorder_button:
+                continue                    # 被拖的自己跟光标走
+            if slot_index >= len(self._slots):
+                continue
+            point = self._springs.get(button)
+            if point is None:
+                continue
+            slot = self._slots[slot_index]
+            point.move_to(slot[0], slot[1])
 
     def _reorder_span_width(self) -> int:
         """给 `relayout` 用的可用宽度（和 `_resize_to_content` 里同一套算法）。"""
@@ -1190,23 +1494,59 @@ class DockBar(QWidget):
                    - self._controls_width())
 
     def _commit_reorder(self) -> None:
-        """松手：把顺序写回配置并重建。
+        """松手：把顺序写回配置，然后让所有图标**弹簧回最终槽位**。
 
         需求 2 的后半句：「如果拖到桌面就保持原样不进行排序」。
-        所以松手位置**在菜单栏之外**时直接放弃本次排序，顺序一点不动。
+        所以松手位置**在菜单栏之外**时直接放弃本次排序，顺序一点不动
+        （但被拖的图标照样弹回去，不会僵在半路上）。
+
+        ⚠️ 这里**不再 `rebuild()`**：重建会把所有图标销毁重来，视觉上
+        消失一帧，回弹动画也就白做了。改成只把顺序同步过来，
+        等回弹结束由 `_finish_settle()` 一次性交接给布局。
+
+        ⚠️⚠️ `quick_changed` **也必须等回弹结束再发**。它不是个"通知一下"
+        那么简单：`tray_app._on_quick_changed()` 收到之后会调 `dock.rebuild()`，
+        而 `rebuild()` 会 `deleteLater()` 掉所有图标 —— 在这一刻发出去，
+        我们正在动画的那些按钮当场被销毁，`_app_buttons` 也会被换成
+        一批"已销毁对象"，整个 Dock 直接废掉。
+        所以这里只挂一个待发标记，交给 `_finish_settle()` 收尾时再发；
+        那时顺序和位置都已经和配置一致，重建出来的按钮落在同样的地方，
+        肉眼看不出来（见 `_finish_settle` 的注释）。
         """
-        inside = self.rect().contains(self.mapFromGlobal(self._release_pos)) \
-            if self._release_pos is not None else True
+        inside = (self.rect().contains(self.mapFromGlobal(self._release_pos))
+                  if self._release_pos is not None else True)
         self.hide_drop_line()
-        self._reset_reorder_shift()
+        buttons = list(self._app_buttons)
+        count = len(buttons)
         src, dst = self._reorder_from, self._reorder_to
-        if not inside:
-            return                          # 拖到菜单栏外面 = 用户想取消
-        if src == dst:
-            return
-        if self.cfg.move_to(src, dst):
-            self.quick_changed.emit()
-            self.rebuild()
+        identity = list(range(count))
+        order = identity
+        if inside and src != dst and 0 <= src < count and 0 <= dst < count:
+            candidate = list(identity)
+            candidate.insert(dst, candidate.pop(src))
+            if self.cfg.move_to(src, dst):
+                order = candidate
+        # 每个按钮的最终槽位 —— 必须用**旧下标**算，下面就会打乱 _app_buttons
+        final_slot = {button: order.index(index)
+                      for index, button in enumerate(buttons)}
+        if order != identity:
+            # 逻辑顺序跟着配置走，之后 `_app_index()` 之类才不会指错
+            self._app_buttons = [buttons[index] for index in order]
+            self._pending_quick_notify = True
+        self._reorder_from = self._reorder_to = 0
+        if self._slots:
+            # 所有图标（含被拖的那个）一起朝最终槽位弹过去。
+            # 被拖的那个从"跟手"的硬弹簧换回普通手感，回弹才不会像被弹弓抽回去。
+            for button in buttons:
+                point = self._springs.get(button)
+                if point is None:
+                    continue
+                slot = self._slots[final_slot[button]]
+                point.tune(**REORDER_SPRING)
+                point.move_to(slot[0], slot[1])
+        # 交给回弹流程：动画停下来时 `_on_anim_tick()` 会调 `_finish_settle()`
+        self._settling = True
+        self._start_anim()
 
     # ------------------------------------------------------------------
     # 拖动 / 右键

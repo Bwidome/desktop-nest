@@ -234,6 +234,32 @@ def main() -> int:
         check("spec 里能找到 EXE 调用", False)
 
     # ------------------------------------------------------------------
+    section("E2. 新增顶层模块必须能被 PyInstaller 静态分析到")
+
+    # PyInstaller 是从 main.py 出发做**静态** import 分析的：放在
+    # `try/except ImportError` 里、或者用 importlib 动态导入的模块会被漏掉，
+    # 打包出来运行到那一步才 `ModuleNotFoundError`（而且只在发行版复现）。
+    # `springs.py` 是 Dock 拖拽排序用的弹簧积分器，必须走最普通的模块级 import。
+    def module_level_imports(path: "Path") -> "set[str]":
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        found: "set[str]" = set()
+        for node in tree.body:                 # 只看模块级语句，不递归进函数
+            if isinstance(node, ast.Import):
+                found.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                found.add(node.module.split(".")[0])
+        return found
+
+    dock_imports = module_level_imports(HERE / "dock.py")
+    check("dock.py 在**模块级**导入了 springs（不是藏在 try/except 里）",
+          "springs" in dock_imports, str(sorted(dock_imports)))
+    check("springs.py 在项目根目录（和 dock.py 同级，静态分析找得到）",
+          (HERE / "springs.py").is_file())
+    spring_imports = module_level_imports(HERE / "springs.py")
+    check("springs.py 只依赖标准库（冻结时不用额外 hook / 隐藏导入）",
+          spring_imports <= {"math", "__future__"}, str(sorted(spring_imports)))
+
+    # ------------------------------------------------------------------
     section("F. 发行说明模板")
 
     readme = HERE / "release" / "使用说明.txt"

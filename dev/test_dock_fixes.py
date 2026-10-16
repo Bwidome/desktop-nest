@@ -693,6 +693,7 @@ def main() -> int:
         print()
         print("── 14. 长按左键拖动排序常用软件 ──")
         names_before = [Path(str(b._payload)).name for b in dock._app_buttons]
+        ids_before = [id(b) for b in dock._app_buttons]
         source = dock._app_buttons[0]
         local, glob = press(source)
         send_mouse(source, QEvent.Type.MouseButtonPress, local, glob)
@@ -706,6 +707,11 @@ def main() -> int:
         send_mouse(source, QEvent.Type.MouseMove, local, target_glob)
         check("按光标位置算出了目标槽位", dock._reorder_to == 2,
               str(dock._reorder_to))
+        # 拖动途中**绝对不能**重建图标：重建会把正在做弹簧动画的按钮删掉，
+        # 动画当场断掉（用户看到的就是"拖到一半跳回去"）。
+        check("拖到一半没有重建图标（否则动画会被打断）",
+              [id(b) for b in dock._app_buttons] == ids_before,
+              f"{[id(b) for b in dock._app_buttons]} vs {ids_before}")
         line = dock._drop_line
         check("插入指示线显示出来了", line is not None and line.isVisible())
         if line is not None and line.isVisible():
@@ -715,6 +721,9 @@ def main() -> int:
 
         send_mouse(source, QEvent.Type.MouseButtonRelease, local, target_glob)
         wait_until(lambda: len(dock._app_buttons) == len(names_before), 5)
+        # 松手之后先是一段"弹簧回位"，等它结束再断言最终状态
+        settled = wait_until(lambda: not dock._settling, 3)
+        check("回弹结束（_settling 归位）", settled and not dock._settling)
         names_after = [Path(str(b._payload)).name for b in dock._app_buttons]
         expected = [names_before[1], names_before[2], names_before[0]] + names_before[3:]
         check("顺序按拖动结果重排了", names_after == expected,
@@ -724,6 +733,23 @@ def main() -> int:
               str([Path(e["path"]).name for e in cfg.quick_items]))
         check("UI 顺序与配置顺序一致（没有不同步）",
               names_after == [Path(e["path"]).name for e in cfg.quick_items])
+
+        def all_alive() -> bool:
+            """每个按钮都还能用（不是"已销毁对象"）。"""
+            for item in dock._app_buttons:
+                try:
+                    item.icon()
+                except RuntimeError:
+                    return False
+            return True
+
+        # 注意：这个 dock 是从 tray_app 里拿的，`quick_changed` 接到
+        # `dock.rebuild()` 上，所以**收尾时确实会重建一次**（这是真实链路）。
+        # 要紧的是：重建只能发生在回弹**之后**，而且之后状态必须干净。
+        check("回弹结束后图标全是活的对象（没被销毁对象污染）", all_alive())
+        check("apps_flow 的视觉顺序与 _app_buttons 一致（交接完成）",
+              dock.apps_flow._items[1:] == list(dock._app_buttons))
+        check("弹簧表已清空（动画收尾干净）", not dock._springs)
         check("松手后指示线收起来了",
               dock._drop_line is None or not dock._drop_line.isVisible())
         check("排序过程中没有顺手把软件启动了", not launched, str(launched))
