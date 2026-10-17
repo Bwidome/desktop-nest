@@ -13,8 +13,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from qt_compat import (
-    QCheckBox, QColor, QDialog, QFont, QFontMetrics, QHBoxLayout, QIcon,
-    QImage, QLabel, QPainter, QPainterPath, QPalette, QPen, QPixmap, QPointF,
+    QCheckBox, QColor, QDialog, QEvent, QFont, QFontMetrics,
+    QGraphicsOpacityEffect, QHBoxLayout, QIcon, QImage, QLabel, QPainter,
+    QPainterPath, QPalette, QPen, QPixmap, QPointF, QPropertyAnimation,
     QPushButton, QRect, QScrollArea, QSize, Qt, QTimer, QVBoxLayout, QWidget,
     Signal,
 )
@@ -198,10 +199,16 @@ class ElidedLabel(QLabel):
     用（自检也按它比对）。所以这里只重写"怎么画"，不碰 `text()` 的内容。
     """
 
-    def __init__(self, text: str = "", max_lines: int = 2, parent=None):
+    def __init__(self, text: str = "", max_lines: int = 2, parent=None,
+                 *, mode=None, align=None):
         super().__init__(text, parent)
         self.max_lines = max(1, int(max_lines))
         self._color: "QColor | None" = None
+        # 单行时的省略位置：默认结尾（名字），路径这类"两头都有信息"的
+        # 内容要传 ElideMiddle，否则 `C:\Users\…\Desktop` 会把尾巴吃掉
+        self._mode = mode or Qt.TextElideMode.ElideRight
+        self._align = align or (Qt.AlignmentFlag.AlignHCenter |
+                                Qt.AlignmentFlag.AlignTop)
         # 让 sizeHint 按多行算，外部给的高度才够放两行
         self.setWordWrap(True)
 
@@ -277,12 +284,26 @@ class ElidedLabel(QLabel):
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         metrics = QFontMetrics(self.font())
         rect = self.contentsRect()
-        lines = self._layout_lines(metrics, max(1, rect.width()))
+        width = max(1, rect.width())
+        if self.max_lines == 1:
+            # 单行：交给 QFontMetrics 一次算完（能按 mode 从中间省略），
+            # 自己逐字折行反而会把路径截得看不出是哪一层目录
+            text = " ".join(self.text().split("\n"))
+            lines = [metrics.elidedText(text, self._mode, width)] if text else []
+        else:
+            lines = self._layout_lines(metrics, width)
         painter.setPen(self._line_color())
-        flags = int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        flags = int(self._align)
         line_height = metrics.height()
-        top = rect.top()
-        for line in lines[: self.max_lines]:
+        shown = lines[: self.max_lines]
+        # 单行标签常被塞进比文字高的行（比如和 36px 高的按钮并排），
+        # 不按 AlignVCenter 自己算的话，文字会贴在行顶上
+        total = line_height * len(shown)
+        if self._align & Qt.AlignmentFlag.AlignVCenter:
+            top = rect.top() + max(0, (rect.height() - total) // 2)
+        else:
+            top = rect.top()
+        for line in shown:
             painter.drawText(QRect(rect.left(), top, rect.width(), line_height),
                              flags, line)
             top += line_height
@@ -314,9 +335,126 @@ def search_icon(color: str, size: int = 15) -> "QIcon":
     return QIcon(pixmap)
 
 
+class Toast(QLabel):
+    """卡片底部中央的一颗轻提示（Toast）。
+
+    为什么不用 QMessageBox 做"已撤销"这类反馈：弹窗要点一下「确定」才能继续，
+    连续撤销时就变成了障碍。Toast 自己出现、自己淡出，不打断手上的操作。
+
+    用法（父控件一般是卡片本身，`place()` 会把它摆在底部居中）：
+
+        self.toast = Toast(self.card)
+        self.toast.show_message("✓ 已撤销\\n3 个项目已恢复到原来的位置")
+    """
+
+    # 停留时长 / 淡入淡出时长（毫秒）
+    DURATION = 2600
+    FADE_IN = 130
+    FADE_OUT = 220
+    # 离卡片底边的距离：正好在底部按钮那一排的上方
+    BOTTOM_GAP = 76
+
+    #: kind → objectName。样式在 theme.py 的「Tooltip + Toast」一节
+    _KINDS = {"ok": "ToastOk", "warn": "ToastWarn", "danger": "ToastDanger"}
+
+    def __init__(self, parent=None, *, duration: int = 0):
+        super().__init__(parent)
+        self.setObjectName("Toast")
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setWordWrap(True)
+        # 提示不该抢鼠标：压在按钮上时点下去要能穿透到按钮
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._stay = int(duration or self.DURATION)
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(self._stay)
+        self._timer.timeout.connect(self.dismiss)
+        # 透明度动画走 QGraphicsOpacityEffect——QSS 没有 opacity 也没有 transition
+        self._effect = QGraphicsOpacityEffect(self)
+        self._effect.setOpacity(1.0)
+        self.setGraphicsEffect(self._effect)
+        self._anim = QPropertyAnimation(self._effect, b"opacity", self)
+        self._anim.finished.connect(self._on_anim_finished)
+        self._fading_out = False
+        self.hide()
+        # 跟着父控件改尺寸：装个事件过滤器，而不是让每个窗口都去覆盖
+        # resizeEvent——重裁圆角那条路是 GlassCardMixin 的，别被别的事占用
+        if parent is not None:
+            parent.installEventFilter(self)
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if obj is self.parentWidget() and event.type() == QEvent.Type.Resize:
+            self.place()
+        return super().eventFilter(obj, event)
+
+    # ------------------------------------------------------------------
+    def show_message(self, text: str, kind: str = "ok", *,
+                     animate: bool = True) -> None:
+        """显示一条提示。`kind` 取 `ok` / `warn` / `danger` / 其它（中性）。"""
+        self.setObjectName(self._KINDS.get(kind, "Toast"))
+        style = self.style()
+        style.unpolish(self)
+        style.polish(self)
+        self.setText(text)
+        self.adjustSize()
+        self.place()
+        self._fading_out = False
+        self.show()
+        self.raise_()
+        self._fade_to(1.0, self.FADE_IN, animate)
+        self._timer.start(self._stay)
+
+    def dismiss(self) -> None:
+        """淡出并隐藏（计时到了会自己调）。"""
+        self._timer.stop()
+        if self.isHidden():
+            return
+        self._fading_out = True
+        self._fade_to(0.0, self.FADE_OUT, True)
+
+    def hide_now(self) -> None:
+        self._timer.stop()
+        self._anim.stop()
+        self._effect.setOpacity(0.0)
+        self.hide()
+
+    def place(self) -> None:
+        """摆在父控件底部居中，并夹在父控件内（窗口很窄时也不会跑出去）。"""
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        limit = max(160, parent.width() - 48)
+        if self.width() > limit:
+            self.setFixedWidth(limit)
+            self.adjustSize()
+        else:
+            self.setMinimumWidth(0)
+            self.setMaximumWidth(16777215)
+        x = (parent.width() - self.width()) // 2
+        y = parent.height() - self.height() - self.BOTTOM_GAP
+        self.move(max(6, x), max(6, y))
+
+    # ------------------------------------------------------------------
+    def _fade_to(self, value: float, duration: int, animate: bool) -> None:
+        self._anim.stop()
+        if not animate or duration <= 0:
+            self._effect.setOpacity(value)
+            if value <= 0.0:
+                self.hide()
+            return
+        self._anim.setDuration(int(duration))
+        self._anim.setStartValue(float(self._effect.opacity()))
+        self._anim.setEndValue(float(value))
+        self._anim.start()
+
+    def _on_anim_finished(self) -> None:
+        if self._fading_out:
+            self._fading_out = False
+            self.hide()
+
+
 def clear_hover(widget) -> None:
     """强制清掉控件当前的 `:hover` 高亮。
-
     需求："打开软件后菜单栏的高光应该随之消失，而不是一直保持高亮"。
     点完图标，鼠标**还停在原位**，Qt 不会自己补一个 leave 事件，
     `WA_UnderMouse` 就一直为真，样式表里 `:hover` 那层底色也就一直亮着——

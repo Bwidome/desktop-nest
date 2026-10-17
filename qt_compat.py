@@ -37,15 +37,16 @@ try:
         pyqtSignal as Signal,
     )
     from PyQt6.QtGui import (  # noqa: F401
-        QAction, QColor, QCursor, QDrag, QFont, QFontDatabase, QFontMetrics,
-        QIcon, QImage, QLinearGradient, QMouseEvent, QPainter, QPainterPath,
-        QPalette, QPen, QPixmap, QRadialGradient,
+        QAction, QBrush, QColor, QCursor, QDrag, QFont, QFontDatabase,
+        QFontMetrics, QIcon, QImage, QLinearGradient, QMouseEvent, QPainter,
+        QPainterPath, QPalette, QPen, QPixmap, QRadialGradient,
     )
     from PyQt6.QtWidgets import (  # noqa: F401
-        QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
-        QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QInputDialog,
-        QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
-        QPushButton, QScrollArea, QSystemTrayIcon, QTabWidget, QToolButton,
+        QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
+        QFileDialog, QFrame, QGraphicsDropShadowEffect, QGraphicsOpacityEffect,
+        QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
+        QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton,
+        QScrollArea, QSizePolicy, QSystemTrayIcon, QTabWidget, QToolButton,
         QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
     )
 
@@ -60,16 +61,18 @@ except ImportError as exc:  # pragma: no cover
             QPropertyAnimation, QRect, QSize, Qt, QThread, QTimer, Signal,
         )
         from PySide6.QtGui import (  # type: ignore  # noqa: F401
-            QAction, QColor, QCursor, QDrag, QFont, QFontDatabase, QFontMetrics,
-            QIcon, QImage, QLinearGradient, QMouseEvent, QPainter,
+            QAction, QBrush, QColor, QCursor, QDrag, QFont, QFontDatabase,
+            QFontMetrics, QIcon, QImage, QLinearGradient, QMouseEvent, QPainter,
             QPainterPath, QPalette, QPen, QPixmap, QRadialGradient,
         )
         from PySide6.QtWidgets import (  # type: ignore  # noqa: F401
-            QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
-            QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QInputDialog,
-            QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
-            QPushButton, QScrollArea, QSystemTrayIcon, QTabWidget, QToolButton,
-            QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+            QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
+            QFileDialog, QFrame, QGraphicsDropShadowEffect,
+            QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QHeaderView,
+            QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu,
+            QMessageBox, QPushButton, QScrollArea, QSizePolicy,
+            QSystemTrayIcon, QTabWidget, QToolButton, QTreeWidget,
+            QTreeWidgetItem, QVBoxLayout, QWidget,
         )
 
         BACKEND = "PySide6"

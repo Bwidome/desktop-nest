@@ -45,39 +45,54 @@ from pathlib import Path
 
 from qt_compat import (
     popup_menu,
-    QCheckBox, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton, QTabWidget,
+    QAbstractItemView, QBrush, QCheckBox, QColor, QFrame, QHBoxLayout,
+    QHeaderView, QLabel, QMessageBox, QPushButton, QSizePolicy, QTabWidget,
     QToolButton, QTreeWidget, QTreeWidgetItem, Qt, QVBoxLayout, QWidget, Signal,
 )
 
 import config
 import engine
 import nest
-from widgets import GlassCardMixin, IconLoader, app_icon
+import theme as theme_mod
+from widgets import ElidedLabel, GlassCardMixin, IconLoader, Toast, app_icon
 
 
 class StatCard(QFrame):
-    """一个统计小卡片。"""
+    """一个统计小卡片：标题 / 大数字 / 一行状态。
+
+    状态那行带 `state` 动态属性（`ok` / `warn` / `idle`），颜色由
+    `theme.py` 的 `#StatState[state=...]` 决定——只染文字，不铺底色。
+    """
 
     def __init__(self, title: str, value: str = "0", hint: str = "", parent=None):
         super().__init__(parent)
         self.setObjectName("Card")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 13, 16, 13)
-        layout.setSpacing(1)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(2)
         self.title = QLabel(title)
         self.title.setObjectName("StatLabel")
         self.value = QLabel(value)
         self.value.setObjectName("StatValue")
         self.hint = QLabel(hint)
-        self.hint.setObjectName("Hint")
+        self.hint.setObjectName("StatState")
+        self.hint.setProperty("state", "idle")
         self.hint.setWordWrap(True)
         layout.addWidget(self.title)
         layout.addWidget(self.value)
         layout.addWidget(self.hint)
+        # 三张卡片等宽等高，状态行长短不一时靠这个把内容顶在上沿
+        layout.addStretch(1)
 
-    def update_values(self, value: str, hint: str) -> None:
+    def update_values(self, value: str, hint: str, state: str = "idle") -> None:
         self.value.setText(value)
         self.hint.setText(hint)
+        # 动态属性变了要重新 polish，否则样式表不会重算
+        if self.hint.property("state") != state:
+            self.hint.setProperty("state", state)
+            style = self.hint.style()
+            style.unpolish(self.hint)
+            style.polish(self.hint)
 
 
 class MainPanel(GlassCardMixin, QWidget):
@@ -181,19 +196,28 @@ class MainPanel(GlassCardMixin, QWidget):
         root.addLayout(cards)
 
         # 收纳位置（隐藏目录，只读展示）
+        # 需求：路径是"备查"信息，不该和上面的统计数字抢注意力——
+        # 小一号、淡一档，长了从中间省略，鼠标悬停看完整路径。
         path_row = QHBoxLayout()
-        path_row.setSpacing(8)
+        path_row.setSpacing(10)
         label = QLabel("收纳位置")
-        label.setObjectName("Hint")
+        label.setObjectName("SectionLabel")
         path_row.addWidget(label)
-        self.path_label = QLabel(str(nest.nest_root()))
-        self.path_label.setObjectName("Hint")
-        self.path_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.path_label = ElidedLabel(
+            str(nest.nest_root()), 1,
+            mode=Qt.TextElideMode.ElideMiddle,
+            align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.path_label.setObjectName("PathText")
+        self.path_label.setToolTip(str(nest.nest_root()))
+        # 宽度交给布局分配，文本自己按当前宽度省略（别让长路径把窗口撑开）
+        self.path_label.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                      QSizePolicy.Policy.Preferred)
         path_row.addWidget(self.path_label, 1)
-        self.btn_open_nest = QPushButton("打开收纳目录")
+        self.btn_open_nest = QPushButton("在文件夹中打开")
+        self.btn_open_nest.setObjectName("Ghost")
+        self.btn_open_nest.setToolTip("在资源管理器里打开收纳目录（可以自己看看文件在不在）")
         self.btn_open_nest.clicked.connect(
-            lambda: engine.open_in_explorer(nest.desktop_store()))
+            lambda _checked=False: engine.open_in_explorer(nest.desktop_store()))
         path_row.addWidget(self.btn_open_nest)
         root.addLayout(path_row)
 
@@ -231,8 +255,9 @@ class MainPanel(GlassCardMixin, QWidget):
         self.btn_refresh.clicked.connect(self.request_refresh.emit)
         actions.addWidget(self.btn_refresh)
 
-        self.btn_browse = QPushButton("打开收纳面板（分页）")
+        self.btn_browse = QPushButton("打开收纳面板")
         self.btn_browse.setObjectName("Soft")
+        self.btn_browse.setToolTip("打开分页浏览的收纳面板，可搜索、可拖拽")
         self.btn_browse.clicked.connect(self.request_browse.emit)
         actions.addWidget(self.btn_browse)
         actions.addStretch(1)
@@ -257,70 +282,111 @@ class MainPanel(GlassCardMixin, QWidget):
         self.btn_take.setEnabled(False)
         self.btn_restore.setEnabled(False)
 
+        # 轻提示：撤销成功之类"做完了"的反馈不该弹窗打断操作，
+        # 在卡片底部浮一颗药丸，两秒多后自己淡出（见 widgets.Toast）
+        self.toast = Toast(self.card)
+
     def _build_items_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
-
-        self.items_hint = QLabel("")
-        self.items_hint.setObjectName("Hint")
-        self.items_hint.setWordWrap(True)
-        layout.addWidget(self.items_hint)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
 
         self.items_tree = QTreeWidget()
+        self.items_tree.setObjectName("ItemsTree")
         self.items_tree.setColumnCount(4)
         self.items_tree.setHeaderLabels(["名称", "类型", "大小", "修改时间"])
         self.items_tree.setRootIsDecorated(False)
         self.items_tree.setUniformRowHeights(True)
         self.items_tree.setWordWrap(False)
         self.items_tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
-        self.items_tree.header().setStretchLastSection(True)
         self.items_tree.setSelectionMode(
             QTreeWidget.SelectionMode.ExtendedSelection)
+        self.items_tree.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self.items_tree.setVerticalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.items_tree.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                      QSizePolicy.Policy.Expanding)
         self.items_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.items_tree.customContextMenuRequested.connect(self._context_menu)
         self.items_tree.itemDoubleClicked.connect(self._open_item)
+        header = self.items_tree.header()
+        header.setStretchLastSection(False)
+        header.setHighlightSections(False)
         for index, width in enumerate((300, 90, 90)):
             self.items_tree.setColumnWidth(index, width)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.items_tree, 1)
+
+        # 提示放在表格下面：表格从标签栏正下方开始铺满，中间不留空档
+        self.items_hint = QLabel("")
+        self.items_hint.setObjectName("Hint")
+        self.items_hint.setWordWrap(True)
+        layout.addWidget(self.items_hint)
         return widget
 
     def _build_history_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
 
+        self.history_tree = QTreeWidget()
+        self.history_tree.setObjectName("HistoryTree")
+        # 需求给的五列：时间 / 动作 / 条目数 / 说明 / 操作
+        self.history_tree.setColumnCount(5)
+        self.history_tree.setHeaderLabels(
+            ["时间", "动作", "条目数", "说明", "操作"])
+        self.history_tree.setRootIsDecorated(False)
+        self.history_tree.setUniformRowHeights(True)
+        self.history_tree.setWordWrap(False)
+        self.history_tree.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.history_tree.setSelectionMode(
+            QTreeWidget.SelectionMode.SingleSelection)
+        self.history_tree.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        # 逐像素滚动：40 行时滚一格跳三行会很难定位
+        self.history_tree.setVerticalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.history_tree.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                        QSizePolicy.Policy.Expanding)
+        header = self.history_tree.header()
+        header.setStretchLastSection(False)
+        header.setHighlightSections(False)
+        for index, width in enumerate((136, 64, 64)):
+            self.history_tree.setColumnWidth(index, width)
+        # 「说明」吃掉多余宽度（列表才不会缩在左边留一大片空白），
+        # 「操作」固定窄列，位置稳定
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        self.history_tree.setColumnWidth(4, 58)
+        self.history_tree.itemSelectionChanged.connect(
+            self._update_history_buttons)
+        # 「操作」列是文字链（见 refresh_history），点它就撤销这一条
+        self.history_tree.itemClicked.connect(self._on_history_clicked)
+        layout.addWidget(self.history_tree, 1)
+
+        footer = QHBoxLayout()
+        footer.setSpacing(8)
         self.history_hint = QLabel("")
         self.history_hint.setObjectName("Hint")
         self.history_hint.setWordWrap(True)
-        layout.addWidget(self.history_hint)
+        footer.addWidget(self.history_hint, 1)
 
-        self.history_tree = QTreeWidget()
-        self.history_tree.setColumnCount(4)
-        self.history_tree.setHeaderLabels(["时间", "动作", "条目数", "说明"])
-        self.history_tree.setRootIsDecorated(False)
-        self.history_tree.setUniformRowHeights(True)
-        self.history_tree.setSelectionMode(
-            QTreeWidget.SelectionMode.SingleSelection)
-        self.history_tree.itemSelectionChanged.connect(self._update_history_buttons)
-        for index, width in enumerate((150, 80, 70)):
-            self.history_tree.setColumnWidth(index, width)
-        layout.addWidget(self.history_tree, 1)
-
-        history_actions = QHBoxLayout()
-        history_actions.setSpacing(8)
         self.btn_undo = QPushButton("撤销选中操作")
-        self.btn_undo.clicked.connect(self._undo_selected)
+        self.btn_undo.setToolTip(
+            "把选中的那次操作整体搬回原来的位置（只移动，不删除）")
+        self.btn_undo.clicked.connect(lambda _checked=False: self._undo_selected())
         self.btn_undo.setEnabled(False)
-        history_actions.addWidget(self.btn_undo)
+        footer.addWidget(self.btn_undo)
         self.btn_clear_history = QPushButton("清空历史")
         self.btn_clear_history.setObjectName("Ghost")
-        self.btn_clear_history.clicked.connect(self._clear_history)
-        history_actions.addWidget(self.btn_clear_history)
-        history_actions.addStretch(1)
-        layout.addLayout(history_actions)
+        self.btn_clear_history.setToolTip("只删操作记录，不动任何文件")
+        self.btn_clear_history.clicked.connect(
+            lambda _checked=False: self._clear_history())
+        footer.addWidget(self.btn_clear_history)
+        layout.addLayout(footer)
         return widget
 
     def apply_theme(self, dark: bool) -> None:
@@ -328,6 +394,11 @@ class MainPanel(GlassCardMixin, QWidget):
         # 这里保留参数是为了和调用方（tray_app）的接口保持一致。
         self.dark = dark
         self._restyle()
+        # 路径标签是自己画的（要在中间省略），颜色得显式喂一份——
+        # 自绘控件读的是 palette，QSS 的 color 不保证传进来
+        if hasattr(self, "path_label"):
+            self.path_label.set_text_color(
+                theme_mod.glass_palette()["text_muted"])
 
     # ------------------------------------------------------------------
     # 显示文件后缀名
@@ -374,6 +445,12 @@ class MainPanel(GlassCardMixin, QWidget):
         self._drag_offset = None
         super().mouseReleaseEvent(event)
 
+    def show_toast(self, text: str, kind: str = "ok") -> None:
+        """在卡片底部浮一条轻提示（不打断操作，两秒多后自己淡出）。"""
+        toast = getattr(self, "toast", None)
+        if toast is not None:
+            toast.show_message(text, kind)
+
     def keyPressEvent(self, event) -> None:  # noqa: N802
         if event.key() == Qt.Key.Key_Escape:
             self.hide()
@@ -405,12 +482,21 @@ class MainPanel(GlassCardMixin, QWidget):
     def refresh_cards(self, nest_items: int = 0, desktop_pending: int = 0,
                       folders: int = 0, shortcuts: int = 0) -> None:
         files = max(0, nest_items - folders - shortcuts)
-        self.card_nest.update_values(
-            str(nest_items),
-            f"快捷方式 {shortcuts} · 文件夹 {folders} · 文件 {files}")
-        self.card_desktop.update_values(
-            str(desktop_pending),
-            "桌面已经清空 🎉" if desktop_pending == 0 else "点「收纳桌面」收进来")
+        if nest_items:
+            self.card_nest.update_values(
+                str(nest_items),
+                f"快捷方式 {shortcuts} · 文件夹 {folders} · 文件 {files}")
+        else:
+            self.card_nest.update_values("0", "收纳面板里还没有东西")
+
+        # 需求：状态用一句话说清楚，并且只给**这句话**上状态色
+        # （0 项 = ✓ 绿，有积压 = ⚠ 暖黄），不铺底色、不用大红大绿。
+        if desktop_pending == 0:
+            self.card_desktop.update_values("0", "✓ 桌面已整理", "ok")
+        else:
+            self.card_desktop.update_values(
+                str(desktop_pending),
+                f"⚠ 还有 {desktop_pending} 项未整理", "warn")
 
         quick = self.cfg.quick_items
         self.card_quick.update_values(
@@ -419,14 +505,17 @@ class MainPanel(GlassCardMixin, QWidget):
             if quick else "右键面板内容即可添加")
 
         self.path_label.setText(str(nest.nest_root()))
+        self.path_label.setToolTip(str(nest.nest_root()))
         self.subtitle.setText(f"桌面：{self.cfg.desktop}")
 
-        if desktop_pending == 0 and nest_items:
-            self.badge_state.setObjectName("BadgeOk")
-            self.badge_state.setText("桌面已清空")
-        elif desktop_pending:
+        # 右上角那颗徽标是"数字"，不是状态的复读机——
+        # 状态已经由「桌面待收纳」那张卡片说清楚了，这里再写一遍就是重复。
+        if desktop_pending:
             self.badge_state.setObjectName("Badge")
             self.badge_state.setText(f"{desktop_pending} 项待收纳")
+        elif nest_items:
+            self.badge_state.setObjectName("BadgeOk")
+            self.badge_state.setText(f"{nest_items} 项已收纳")
         else:
             self.badge_state.setObjectName("Badge")
             self.badge_state.setText("准备就绪")
@@ -466,24 +555,76 @@ class MainPanel(GlassCardMixin, QWidget):
         if node is not None:
             node.setIcon(0, icon)
 
+    #: 流水里的 action → 表格里显示的动作名 + 方向说明
+    _ACTION_TEXT = {
+        "take": ("收纳", "桌面 → 收纳面板"),
+        "restore": ("还原", "收纳面板 → 桌面"),
+    }
+
+    @staticmethod
+    def _record_names(record: "dict") -> "list[str]":
+        """这次操作涉及的文件名（按流水顺序）。"""
+        names: "list[str]" = []
+        for move in record.get("moves") or []:
+            if isinstance(move, (list, tuple)) and len(move) == 2:
+                names.append(Path(move[1]).name)
+        return names
+
+    def _describe_record(self, record: "dict", direction: str) -> str:
+        """「说明」列：方向 + 涉及哪几个文件（一行装不下会由表格省略）。"""
+        names = self._record_names(record)
+        if not names:
+            return direction or "—"
+        head = "、".join(names[:2])
+        more = f" 等 {len(names)} 项" if len(names) > 2 else ""
+        return f"{direction} · {head}{more}" if direction else f"{head}{more}"
+
+    def _record_tooltip(self, record: "dict", direction: str) -> str:
+        names = self._record_names(record)
+        if not names:
+            return direction
+        shown = names[:12]
+        lines = [direction, ""] + [f"· {name}" for name in shown]
+        if len(names) > len(shown):
+            lines.append(f"…… 还有 {len(names) - len(shown)} 项")
+        return "\n".join(lines)
+
     def refresh_history(self, records: "list[dict]") -> None:
         self._history = list(records)
+        # 重填之前记下"当前选的是哪一条"，刷新后还能选回去——
+        # 撤销完一次刷新，用户往往接着撤下一次
+        keep: "float | None" = None
+        for node in self.history_tree.selectedItems():
+            keep = node.data(0, int(Qt.ItemDataRole.UserRole))
         self.history_tree.clear()
-        action_labels = {"take": "收纳", "restore": "还原"}
+
+        # 「操作」列是文字链，颜色跟主色走（表格里唯一可点的地方）
+        link = QBrush(QColor(theme_mod.glass_palette()["accent"]))
         for record in records:
-            action = action_labels.get(record.get("action"), record.get("action", ""))
+            stamp = float(record.get("time", 0) or 0)
+            raw_action = str(record.get("action", "") or "")
+            label, direction = self._ACTION_TEXT.get(
+                raw_action, (raw_action or "—", ""))
             count = int(record.get("count", 0) or 0)
             node = QTreeWidgetItem([
-                engine.time_text(record.get("time", 0)), action,
-                str(count), f"{count} 项，可整体撤销",
+                engine.time_text(stamp), label, str(count),
+                self._describe_record(record, direction), "撤销",
             ])
             # 把时间戳挂在行上，撤销时据此找回原始流水（含完整 moves 列表）
-            node.setData(0, int(Qt.ItemDataRole.UserRole), float(record.get("time", 0)))
+            node.setData(0, int(Qt.ItemDataRole.UserRole), stamp)
+            node.setTextAlignment(2, Qt.AlignmentFlag.AlignCenter)
+            node.setTextAlignment(4, Qt.AlignmentFlag.AlignCenter)
+            node.setForeground(4, link)
+            node.setToolTip(3, self._record_tooltip(record, direction))
+            node.setToolTip(4, "点这里把这次操作整体搬回原来的位置")
             self.history_tree.addTopLevelItem(node)
+            if keep is not None and abs(stamp - float(keep)) < 0.0005:
+                node.setSelected(True)
+
         if records:
             self.history_hint.setText(
-                f"最近 {len(records)} 次操作。选中一条点「撤销选中操作」，"
-                "就能把它们整体搬回原来的位置。")
+                f"最近 {len(records)} 次操作 · 选中一行点「撤销」，"
+                "或直接点行尾的「撤销」")
         else:
             self.history_hint.setText(
                 "还没有操作记录。收纳或还原桌面后，这里会出现可撤销的记录。")
@@ -493,52 +634,86 @@ class MainPanel(GlassCardMixin, QWidget):
         if hasattr(self, "btn_undo"):
             self.btn_undo.setEnabled(bool(self.history_tree.selectedItems()))
 
-    def _selected_record(self) -> "dict | None":
-        nodes = self.history_tree.selectedItems()
-        if not nodes:
+    def _on_history_clicked(self, node: QTreeWidgetItem, column: int) -> None:
+        """点「操作」列 = 撤销这一条（选中态会由 QTreeWidget 自己处理）。"""
+        if column != 4 or node is None:
+            return
+        self._undo_record(self._record_for_node(node))
+
+    def _record_for_node(self, node: "QTreeWidgetItem | None") -> "dict | None":
+        if node is None:
             return None
-        stamp = nodes[0].data(0, int(Qt.ItemDataRole.UserRole))
+        stamp = node.data(0, int(Qt.ItemDataRole.UserRole))
+        if stamp is None:
+            return None
         for record in self._history:
             if abs(float(record.get("time", -1)) - float(stamp)) < 0.0005:
                 return record
         return None
 
+    def _selected_record(self) -> "dict | None":
+        nodes = self.history_tree.selectedItems()
+        if not nodes:
+            return None
+        return self._record_for_node(nodes[0])
+
     def _undo_selected(self) -> None:
-        record = self._selected_record()
+        self._undo_record(self._selected_record())
+
+    def _undo_record(self, record: "dict | None") -> None:
+        """按流水整体撤回一次操作。
+
+        不再弹「确定吗」：撤销本身就是可逆的（再收纳一次就回去了），
+        而连续撤销时每撤一次都要点一下弹窗，比误点更让人烦。
+        """
         if record is None:
-            return
-        count = int(record.get("count", 0) or 0)
-        if QMessageBox.question(
-                self, "撤销操作",
-                f"把这次操作的 {count} 个条目搬回原来的位置？\n\n"
-                "文件只是移动，不会被删除；目标已存在同名文件时自动加序号。",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes) != QMessageBox.StandardButton.Yes:
             return
         result = nest.undo_record(record)
         if result.moved and not result.failed:
             # 全部搬回才删流水，避免"撤了一半"之后记录丢失
             nest.drop_journal_record(record.get("time", 0))
         self.request_refresh.emit()
-        message = f"已撤销 {result.moved} 项"
+
         if result.failed:
-            message += "\n\n未能撤销：\n" + "\n".join(
-                f"· {n}：{r}" for n, r in result.failed[:6])
+            message = f"已撤销 {result.moved} 项，{len(result.failed)} 项没能搬回去：\n" + \
+                "\n".join(f"· {n}：{r}" for n, r in result.failed[:6])
             QMessageBox.warning(self, "撤销操作", message)
+            self.show_toast(
+                f"⚠ 撤销了 {result.moved} 项，{len(result.failed)} 项没搬回去",
+                "warn")
+        elif result.moved:
+            self.show_toast(
+                f"✓ 已撤销\n{result.moved} 个项目已恢复到原来的位置", "ok")
         else:
-            QMessageBox.information(self, "撤销操作", message)
+            self.show_toast("⚠ 这次操作已经没有可撤销的条目了", "warn")
+
+    def _confirm_clear_history(self) -> bool:
+        """清空历史前的确认。
+
+        危险操作的按钮写清楚做什么（「清空」），别用「确定」——
+        用户点之前应该知道自己在点什么。
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle("清空操作历史")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText("清空操作历史？")
+        box.setInformativeText("此操作不会影响已经收纳的文件。")
+        cancel = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        clear = box.addButton("清空", QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(cancel)
+        box.exec()
+        return box.clickedButton() is clear
 
     def _clear_history(self) -> None:
         if not self._history:
             return
-        if QMessageBox.question(
-                self, "清空历史",
-                "清空全部操作记录？\n\n只清记录，不会动任何文件。",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes) != QMessageBox.StandardButton.Yes:
+        if not self._confirm_clear_history():
             return
-        nest.clear_journal()
+        if not nest.clear_journal():
+            self.show_toast("⚠ 清空失败，记录可能正被占用，稍后再试", "warn")
+            return
         self.request_refresh.emit()
+        self.show_toast("✓ 已清空操作历史", "ok")
 
     # ------------------------------------------------------------------
     # 条目操作

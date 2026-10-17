@@ -786,9 +786,11 @@ QToolTip {{
     padding: 9px 14px;
     font-size: {F['sm']}pt;
 }}
+/* 成功 / 警告 / 危险三档和徽标（#BadgeOk …）用同一套"淡底 + 彩字"：
+   整块铺满高饱和色在深色卡片上太吵，也违背"不要大面积用绿 / 红"。 */
 #ToastOk {{
-    background: {c['success']};
-    color: #FFFFFF;
+    background: {c['success_soft']};
+    color: {c['success']};
     border: none;
     border-radius: {R['md']}px;
     padding: 9px 14px;
@@ -796,8 +798,8 @@ QToolTip {{
     font-weight: {W['semibold']};
 }}
 #ToastWarn {{
-    background: {c['warn']};
-    color: #FFFFFF;
+    background: {c['warn_soft']};
+    color: {c['warn']};
     border: none;
     border-radius: {R['md']}px;
     padding: 9px 14px;
@@ -805,8 +807,8 @@ QToolTip {{
     font-weight: {W['semibold']};
 }}
 #ToastDanger {{
-    background: {c['danger']};
-    color: #FFFFFF;
+    background: {c['danger_soft']};
+    color: {c['danger']};
     border: none;
     border-radius: {R['md']}px;
     padding: 9px 14px;
@@ -1057,4 +1059,44 @@ QProgressBar {{
     color: transparent;
 }}
 QProgressBar::chunk {{ background: {c['accent']}; border-radius: 3px; }}
+
+/* ---------- 22. 管理页面（主面板）---------- */
+/* 数量卡片底部那行状态：「✓ 桌面已整理 / ⚠ 还有 3 项未整理」。
+   只给**文字**上色，不铺底色——三块彩色卡片并排会变成仪表盘，
+   而这里只需要"一眼看出有没有待办"。 */
+#StatState {{ font-size: {F['sm']}pt; }}
+#StatState[state="ok"] {{ color: {c['success']}; }}
+#StatState[state="warn"] {{ color: {c['warn']}; }}
+#StatState[state="idle"] {{ color: {c['text_faint']}; }}
+
+/* 收纳位置：路径是"备查"信息，不是主信息，压到最小一号、最淡一档 */
+#PathText {{ color: {c['text_muted']}; font-size: {F['xs']}pt; }}
+
+/* 两张表（面板内容 / 操作历史）共用一套行规格：
+   行距从 3px 拉到 8px，表头去掉实心底、压成一条分隔线——
+   表格里最该被看见的是数据，不是表头。悬停和选中都只换一层淡底。 */
+QTreeWidget#ItemsTree, QTreeWidget#HistoryTree {{
+    padding: 4px;
+}}
+QTreeWidget#ItemsTree::item, QTreeWidget#HistoryTree::item {{
+    padding: 8px 6px;
+    border-radius: {R['sm']}px;
+}}
+QTreeWidget#ItemsTree::item:hover, QTreeWidget#HistoryTree::item:hover {{
+    background: {c['hover']};
+}}
+QTreeWidget#ItemsTree::item:selected, QTreeWidget#HistoryTree::item:selected {{
+    background: {c['accent_soft']};
+    color: {c['text']};
+}}
+QTreeWidget#ItemsTree QHeaderView::section,
+QTreeWidget#HistoryTree QHeaderView::section {{
+    background: transparent;
+    color: {c['text_muted']};
+    font-size: {F['xs']}pt;
+    font-weight: {W['semibold']};
+    padding: 4px 6px 8px 6px;
+    border: none;
+    border-bottom: 1px solid {c['border']};
+}}
 {glass_block}"""
