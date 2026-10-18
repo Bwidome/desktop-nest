@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -266,7 +267,14 @@ def main() -> int:
     check("release/使用说明.txt 存在", readme.is_file(), str(readme))
     if readme.is_file():
         text = readme.read_text(encoding="utf-8")
-        check("写的是 v0.3", "v0.3" in text, "")
+        # 版本号不写死两份：以打包脚本的默认值为准，说明书必须跟它一致，
+        # 否则发出去的包和说明书对不上（这种不一致最难被发现）。
+        maker = HERE / "dev" / "make_release.py"
+        found = re.search(r'"--version",\s*default="([^"]+)"',
+                          maker.read_text(encoding="utf-8"))
+        expected = found.group(1) if found else ""
+        check(f"发行说明的版本号与打包脚本一致（{expected or '未知'}）",
+              bool(expected) and expected in text, "")
         check("讲清了「别只拖 exe，要带上 _internal」",
               "_internal" in text)
         check("讲清了删除是删到回收站、可还原",

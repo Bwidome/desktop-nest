@@ -6,8 +6,8 @@
 
 用法（在项目根目录执行）：
 
-    py -3.14 dev\\make_release.py                    :: 默认 v0.3
-    py -3.14 dev\\make_release.py --version v0.4     :: 指定版本号
+    py -3.14 dev\\make_release.py                    :: 默认 v1.0
+    py -3.14 dev\\make_release.py --version v1.1     :: 指定版本号
     py -3.14 dev\\make_release.py --no-build         :: 跳过打包，只重新压缩
     py -3.14 dev\\make_release.py --python <解释器>  :: 手动指定装了 PyInstaller 的解释器
 
@@ -201,7 +201,7 @@ def main() -> int:
         pass
 
     ap = argparse.ArgumentParser(description="出一份发行压缩包")
-    ap.add_argument("--version", default="v0.3", help="版本号，默认 v0.3")
+    ap.add_argument("--version", default="v1.0", help="版本号，默认 v1.0")
     ap.add_argument("--no-build", action="store_true",
                     help="跳过打包，直接压缩现有的 .tmp\\release-build 产物")
     ap.add_argument("--python", default=None,

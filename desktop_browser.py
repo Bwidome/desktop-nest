@@ -59,7 +59,7 @@ from anim import HoverVeil, ease_curve, fade_in
 from textutil import fuzzy_match
 from widgets import (DND_MIME, ElidedLabel, FALLBACK_TILE_COLOR,
                      GlassCardMixin, IconLoader, PLACEHOLDER_COLORS, Toast,
-                     app_icon, icon_hint_for, letter_pixmap, multi_pick,
+                     app_icon, letter_pixmap, multi_pick,
                      pixmap_for, search_icon)
 
 GRID_ICON = 40                 # 网格里的图标显示尺寸（原来 48，偏大）

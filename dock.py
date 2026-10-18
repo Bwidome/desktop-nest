@@ -699,22 +699,6 @@ class DockBar(QWidget):
                 self.main_row.takeAt(index)
             index -= 1
 
-    def _add_control(self, widget: QWidget) -> None:
-        """把控制按钮摆进主行并登记（供 _clear_row 精确摘除）。"""
-        self.main_row.addWidget(widget)
-        self._control_buttons.append(widget)
-
-    def _wire_control(self, button: QToolButton, slot) -> None:
-        """接上控制按钮的点击：**先清掉 hover 高光**，再执行动作。
-
-        跟图标按钮是同一个毛病：点完 ＋/⚙/✕ 之后鼠标还停在按钮上，
-        Qt 不会补 leave 事件，`:hover` 那层底色就一直亮着。
-        """
-        def _run(*_args) -> None:
-            clear_hover(button)
-            slot()
-        button.clicked.connect(_run)
-
     def _controls_width(self) -> int:
         """控制按钮那一串占的宽度（含间距）。
 
