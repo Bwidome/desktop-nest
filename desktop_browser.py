@@ -45,7 +45,7 @@ from pathlib import Path
 from qt_compat import (
     popup_menu,
     QApplication, QEvent, QFontMetrics, QFrame, QGridLayout, QHBoxLayout,
-    QLabel, QLineEdit, QMenu, QMessageBox, QPoint, QPropertyAnimation,
+    QIcon, QLabel, QLineEdit, QMenu, QMessageBox, QPoint, QPropertyAnimation,
     QPushButton, QScrollArea, QSize, QToolButton, QVBoxLayout, QWidget, Qt,
     QTimer, Signal,
 )
@@ -56,9 +56,10 @@ import nest
 import recycle
 import theme as theme_mod
 from textutil import fuzzy_match
-from widgets import (ElidedLabel, FALLBACK_TILE_COLOR, GlassCardMixin,
-                     IconLoader, PLACEHOLDER_COLORS, app_icon, icon_hint_for,
-                     letter_pixmap, multi_pick, pixmap_for, search_icon)
+from widgets import (DND_MIME, ElidedLabel, FALLBACK_TILE_COLOR,
+                     GlassCardMixin, IconLoader, PLACEHOLDER_COLORS, Toast,
+                     app_icon, icon_hint_for, letter_pixmap, multi_pick,
+                     pixmap_for, search_icon)
 
 GRID_ICON = 40                 # 网格里的图标显示尺寸（原来 48，偏大）
 ICON_REQUEST = 64              # 向 Windows 要更大的图标再缩，清晰得多
@@ -68,15 +69,23 @@ TILE_W = CELL_W - 4            # 卡片本身：比单元格小一点，但比�
 TILE_H = CELL_H - 4            # 点击区域跟着变大（需求：点击区域扩大）
 DEFAULT_PER_PAGE = 28          # 7 列 × 4 行
 PAGE_SIZE_CHOICES = [14, 21, 28, 35, 42]
-APP_ICON = 36                  # 常用启动的图标尺寸（原来 34，略放大一档）
-APP_BUTTON_W = 80              # 常用启动按钮的尺寸（跟着图标一起放宽）
-APP_BUTTON_H = 70
+APP_ICON = 38                  # 常用启动的图标尺寸（36 → 38，和按钮一起放大一档）
+APP_BUTTON_W = 84              # 常用启动按钮的尺寸（跟着图标一起放宽）
+APP_BUTTON_H = 72
 # 悬停时图标放大的比例。需求：轻微 scale，**不要超过 1.15**。
 APP_HOVER_SCALE = 1.12
+# 方形画布的**母图**倍数：按 APP_ICON 的 4 倍画一次，再由 Qt 缩到显示尺寸。
+# 只画 1 倍的话，悬停放大到 1.12 时就是把 38px 的图拉成 43px —— 会糊一圈；
+# 有 4 倍母图在手，放大缩下都走平滑变换，边缘一直是利的。
+APP_ICON_MASTER = 4
+# 这一排图标之间的间距（6 → 10）。需求：优化间距 —— 挤在一起时几排图标
+# 会连成一片，读起来像"一坨"，留出呼吸的缝之后每个快捷方式才是独立的。
+APP_GAP = 10
 # 卡片名称最多显示几行（超出走省略号，见 widgets.ElidedLabel）
 NAME_LINES = 2
-# 从网格卡片拖到「常用软件」那一排时携带的 MIME 类型（需求5）
-DND_MIME = "application/x-desktop-nest-item"
+# 从网格卡片拖到「常用软件」那一排时携带的 MIME 类型（需求5）。
+# 常量本体在 widgets 里（已 import 进来）：底部菜单栏也要收同一个包，
+# 见 `widgets.DND_MIME` / `dock.DockBar.dropEvent`。
 # 贴底时默认给底部菜单栏让开的高度。主程序会用 Dock 的**真实高度**覆盖它
 # （见 `set_bottom_reserve`）——写死一个值的话，菜单栏一变高，面板就会压在它身上。
 DEFAULT_BOTTOM_RESERVE = 84
@@ -380,6 +389,9 @@ class AppButton(QToolButton):
         self.path = path
         # 管理模式下的「－」（常用软件 → 左上角减号）；由面板挂上来
         self.badge: "ManageBadge | None" = None
+        # 原始图标 + "已经方形化过了吗"。上屏前拿不到 DPR，见 `set_icon()`。
+        self._icon: "QIcon | None" = None
+        self._squared = False
         self.setObjectName("AppButton")
         self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.setIconSize(QSize(APP_ICON, APP_ICON))
@@ -397,6 +409,34 @@ class AppButton(QToolButton):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(
             lambda pos: self.context_requested.emit(self, self.mapToGlobal(pos)))
+
+    def set_icon(self, icon: QIcon) -> None:
+        """贴图标前先统一到方形画布（和网格卡片同一套口径）。
+
+        常用启动里的图标来源很杂：浏览器图标是正的、压缩工具是竖的、
+        有些 `.lnk` 取出来带一圈透明边。直接 `setIcon` 的话 Qt 按各自比例
+        缩进 `iconSize`，看上去"有的满格、有的缩了一圈"。统一进方形画布之后，
+        每格图标的**视觉重量**才是一致的（需求：优化图标视觉）。
+        """
+        self._icon = icon
+        self._squared = False
+        self._apply_icon()
+
+    def _apply_icon(self) -> None:
+        icon = getattr(self, "_icon", None)
+        if icon is None or icon.isNull():
+            return
+        window = self.window()
+        handle = window.windowHandle() if window is not None else None
+        if handle is None:
+            # 还没上屏，拿不到真实设备像素比 —— 这时候先贴原图（Qt 会自己
+            # 挑尺寸），等 `resizeEvent`（上屏那一刻）再补一次方形化，
+            # 免得在 1.5 倍缩放的屏幕上贴一张按 1 倍算的图，糊一圈。
+            self.setIcon(icon)
+            return
+        self.setIcon(QIcon(pixmap_for(icon, APP_ICON * APP_ICON_MASTER, self,
+                                      square=True)))
+        self._squared = True
 
     def _elide(self, text: str) -> str:
         """按**字体实际宽度**把名字省略到放得下。
@@ -439,6 +479,9 @@ class AppButton(QToolButton):
         super().resizeEvent(event)
         if self.badge is not None:
             self.badge.place()
+        # 第一次上屏：窗口句柄有了，DPR 才是真的，补一次方形化
+        if not self._squared and self._icon is not None:
+            self._apply_icon()
         self.setText(self._elide(self.display_name))
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
@@ -516,6 +559,11 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         self.loader.ready.connect(self._on_icon_ready)
 
         self._build_ui()
+        # 轻提示（加入 / 移出常用启动的反馈）。
+        # 挂在卡片上而不是窗口上：卡片有圆角裁剪，提示跟着卡片走才对得上。
+        # 需求明确"不要使用 Dialog"——增删这种高频小动作弹窗要点一下才能继续，
+        # 连续加几个就变成了障碍。
+        self.toast = Toast(self.surface)
         self._apply_glass_palette()
         self._restore_geometry()
 
@@ -584,7 +632,7 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         self.apps_host.dropped.connect(self._on_quick_dropped)
         self.apps_row = QHBoxLayout(self.apps_host)
         self.apps_row.setContentsMargins(0, 0, 0, 0)
-        self.apps_row.setSpacing(6)
+        self.apps_row.setSpacing(APP_GAP)
         bar.addWidget(self.apps_host)
 
         search_row = QHBoxLayout()
@@ -756,7 +804,7 @@ class DesktopBrowser(GlassCardMixin, QWidget):
             self.apps_row.addWidget(button)
             self._app_buttons.append(button)
             self._attach_quick_badge(button, path)
-            self._request_icon(f"app:{path}", path, name, button.setIcon)
+            self._request_icon(f"app:{path}", path, name, button.set_icon)
 
         # ---- 唯一的控制按钮：管理 ----
         # 需求：「添加和删除控件整合成一个管理控件，点击后，如果是常用软件
@@ -782,6 +830,20 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         self._rebuild_apps()
 
     # ------------------------------------------------------------------
+    # 轻提示（加入 / 移出常用启动的反馈）
+    # ------------------------------------------------------------------
+    def show_toast(self, text: str, kind: str = "ok") -> None:
+        """在卡片底部弹一条自动消失的提示（不用 Dialog，见需求五）。
+
+        只负责 Toast 这一层；底部那行 `hint` 由各个调用点自己维护
+        （它说的是"现在这一页有什么"，和"刚才那一下成没成"是两件事）。
+        """
+        toast = getattr(self, "toast", None)
+        if toast is None:                   # 极端时序：界面还没搭好
+            return
+        toast.show_message(text, kind)
+
+    # ------------------------------------------------------------------
     # 需求5：从网格长按拖到「常用软件」那一排 = 加为常用
     # ------------------------------------------------------------------
     def _on_quick_dropped(self, raw_path: str) -> None:
@@ -798,14 +860,17 @@ class DesktopBrowser(GlassCardMixin, QWidget):
             return
         if self.cfg.is_quick(path):
             self.hint.setText("这个条目已经在常用启动了")
+            self.show_toast("已经在常用启动里了", "warn")
             return
         name = self._quick_name(path)
         if not self.cfg.add_quick(path, name):
             self.hint.setText("加入常用启动失败")
+            self.show_toast("加入常用启动失败", "warn")
             return
         self.rebuild_apps()
         self.request_quick_changed.emit()
         self.hint.setText(f"已把「{name}」加入常用启动")
+        self.show_toast("✓ 已加入常用启动")
 
     # ------------------------------------------------------------------
     # 图标：统一走"孪生路径 + 自愈缓存"
@@ -894,13 +959,23 @@ class DesktopBrowser(GlassCardMixin, QWidget):
             self._refresh_hint()
 
     def _sync_manage_button(self) -> None:
+        """把「管理」控件的文案 / 选中态 / 说明同步成当前状态。
+
+        它同时是这个区域的**状态指示器**：没进管理模式时说明"现在有几个常用项、
+        点进来能干什么"，进了管理模式就变成"点这里退出"。
+        只报数字和动作，不重复底下那行提示。
+        """
         button = getattr(self, "btn_manage", None)
         if button is None:
             return
         button.setChecked(self._manage_mode)
+        count = len(self.cfg.quick_items)
         button.setText("✓\n完成" if self._manage_mode else "⚙\n管理")
-        button.setToolTip("退出管理模式" if self._manage_mode
-                          else "管理常用软件：加号加入、减号移出（也可右键单个软件）")
+        if self._manage_mode:
+            button.setToolTip("退出管理模式")
+        else:
+            button.setToolTip(f"管理常用启动（当前 {count} 项）：\n"
+                              "点开之后，常用项左上角出「－」、其余卡片右上角出「＋」")
 
     def _refresh_hint(self) -> None:
         """把底部提示恢复成"这一页有多少东西"的那句话。"""
@@ -932,8 +1007,10 @@ class DesktopBrowser(GlassCardMixin, QWidget):
             self._render_page()
             self.request_quick_changed.emit()
             self.hint.setText(f"已把「{item.name}」加到常用启动")
+            self.show_toast("✓ 已加入常用启动")
             return True
         self.hint.setText(f"「{item.name}」已经在常用启动里了")
+        self.show_toast("已经在常用启动里了", "warn")
         return False
 
     def remove_quick_path(self, path: Path) -> bool:
@@ -944,6 +1021,7 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         self._render_page()
         self.request_quick_changed.emit()
         self.hint.setText(f"已把「{Path(path).stem or Path(path).name}」移出常用启动")
+        self.show_toast("✓ 已移出常用启动")
         return True
 
     # ------------------------------------------------------------------
@@ -996,6 +1074,10 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         self._render_page()
         self.request_quick_changed.emit()
         self.hint.setText(f"已把 {added} 项加入常用启动" if added else "这些项目已经在常用启动里了")
+        if added:
+            self.show_toast(f"✓ 已加入常用启动（{added} 项）")
+        else:
+            self.show_toast("这些项目已经在常用启动里了", "warn")
 
     def remove_quick_dialog(self) -> None:
         """勾选多项，批量从常用启动移除。"""
@@ -1017,6 +1099,8 @@ class DesktopBrowser(GlassCardMixin, QWidget):
         self._render_page()          # 角标跟着"是不是常用"变，要重画
         self.request_quick_changed.emit()
         self.hint.setText(f"已移除 {removed} 项")
+        if removed:
+            self.show_toast(f"✓ 已移出常用启动（{removed} 项）")
 
     def _launch_app(self, button: AppButton) -> None:
         ok, reason = engine.launch(button.path)

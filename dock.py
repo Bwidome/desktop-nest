@@ -49,8 +49,8 @@ from pathlib import Path
 from qt_compat import (
     popup_menu,
     QColor, QFontMetrics, QFrame, QGridLayout, QHBoxLayout, QIcon, QMenu,
-    QPainter, QPainterPath, QPixmap, QPoint, QSize, QToolButton, QVBoxLayout,
-    QMessageBox, QWidget, Qt, QTimer, Signal,
+    QPainter, QPainterPath, QPen, QPixmap, QPoint, QSize, QToolButton,
+    QVBoxLayout, QMessageBox, QWidget, Qt, QTimer, Signal,
 )
 
 import engine
@@ -58,12 +58,30 @@ import nest
 import safety
 import springs
 import theme as theme_mod
-from widgets import (FALLBACK_TILE_COLOR, IconLoader, PLACEHOLDER_COLORS,
-                     app_icon, clear_hover, letter_pixmap, multi_pick)
+from widgets import (DND_MIME, FALLBACK_TILE_COLOR, IconLoader,
+                     PLACEHOLDER_COLORS, Toast, app_icon, clear_hover,
+                     letter_pixmap, multi_pick)
 
 DOCK_ICON_SIZES = [36, 44, 52, 60]
 DEFAULT_ICON_SIZE = 44
 MIN_MARGIN = 8
+
+#: 图标之间的间距（3 → 6）。原来是"挨着"，一排十几个图标会连成一片，
+#: 读起来是一堵墙；留出 6px 之后每个图标才是独立的一项。
+#: ⚠️ `FlowRow` 的 spacing 与主行的 spacing 必须**用同一个值**：
+#: 换行之后行内间距和行间间距不一样的话，第二行会看着比第一行挤。
+DOCK_GAP = 6
+
+# --------------------------------------------------------------------------
+# 菜单栏底下那层"影子"（画在 paintEvent 里，不是 QSS 也不是 QGraphicsEffect）
+# --------------------------------------------------------------------------
+#: 影子由几层同心圆角矩形叠出来，最外一层 alpha 最低。
+#: 为什么不用 `QGraphicsDropShadowEffect`：它每帧都要把整个菜单栏离屏渲染
+#: 再模糊一遍，而拖拽排序是 60fps 逐帧移动控件的 —— 那就是每帧一次全条模糊。
+#: 这里只是几个圆角矩形填充，代价可以忽略，观感够用（要的是"浮着"，不是"投影"）。
+DOCK_SHADOW_LAYERS = 3
+DOCK_SHADOW_ALPHA = 24         # 最内一层的 alpha（/255），很淡，浅壁纸上也压不脏
+DOCK_SHADOW_SPREAD = 2         # 每往外一层多扩几像素（别超过窗口留白，否则被裁）
 
 # --------------------------------------------------------------------------
 # 排序让位的弹簧手感（积分器在 springs.py）
@@ -410,6 +428,72 @@ class DockIcon(QToolButton):
         super().mouseReleaseEvent(event)
 
 
+class DockToast(Toast):
+    """菜单栏专用的轻提示：浮在菜单栏**正上方**的独立小窗。
+
+    为什么不直接 `Toast(dock)`：`Toast` 是**子控件**，会被父窗口裁掉，
+    而菜单栏窗口正好只有图标那么高，塞不下一条提示（塞进去就会压住图标）。
+
+    做成顶层小窗还要多处理一件事：**顶层 widget 的 QSS 背景不会绘制**
+    （实测 `#ToastOk` 那层底透明得干干净净，只剩一行字浮在壁纸上），
+    连 `WA_StyledBackground` 也救不回来 —— 那是 `WA_TranslucentBackground`
+    打开之后 Qt 不再走"画控件底"那条路。所以药丸底自己画（见 `paintEvent`），
+    文字颜色仍然交给 QSS（`#ToastOk` 的 `color` 是生效的）。
+    """
+
+    #: 离菜单栏顶边的距离
+    GAP = 10
+
+    def __init__(self, anchor: QWidget):
+        super().__init__(None, duration=1800)
+        self._anchor = anchor
+        # ToolTip 类型：不抢焦点、不进任务栏，和气泡提示一个待遇
+        self.setWindowFlags(Qt.WindowType.ToolTip
+                            | Qt.WindowType.FramelessWindowHint
+                            | Qt.WindowType.WindowStaysOnTopHint
+                            | Qt.WindowType.WindowTransparentForInput)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        """自己画药丸底，再把文字交给 QLabel 去画。
+
+        颜色一律取自 Design Token（深色那套），不写死色号：
+        菜单栏是深色浮层，提示跟着它走，浅壁纸上也压得住。
+        """
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        radius = float(theme_mod.RADIUS["md"])
+        path = QPainterPath()
+        path.addRoundedRect(0.5, 0.5, self.width() - 1.0, self.height() - 1.0,
+                            radius, radius)
+        fill = QColor(theme_mod.DARK["toast_bg"])
+        fill.setAlpha(238)                     # 留一点透，看着不像一块实心贴纸
+        painter.fillPath(path, fill)
+        painter.setPen(QPen(QColor(theme_mod.DARK["border_strong"]), 1.0))
+        painter.drawPath(path)
+        painter.end()
+        super().paintEvent(event)              # 文字（颜色来自 QSS）
+
+    def place(self) -> None:  # noqa: D102 - 覆写，见下
+        """贴在菜单栏上方居中。
+
+        菜单栏被拖到屏幕顶边时改放到它**下面**——不然提示会跑到屏幕外面，
+        用户只看到一闪而过的半条边。
+        """
+        anchor = self._anchor
+        self.adjustSize()
+        screen = anchor.screen().availableGeometry()
+        x = anchor.x() + (anchor.width() - self.width()) // 2
+        y = anchor.y() - self.height() - self.GAP
+        if y < screen.top() + 4:
+            y = anchor.y() + anchor.height() + self.GAP
+        x = max(screen.left() + 4,
+                min(x, max(screen.left() + 4,
+                           screen.right() - self.width() - 4)))
+        self.move(x, y)
+
+
 class DockBar(QWidget):
     """贴底的悬浮菜单栏。"""
 
@@ -486,11 +570,19 @@ class DockBar(QWidget):
         self.setWindowTitle("桌面收纳 · 底部菜单栏")
         self.setWindowIcon(app_icon())
         self.setMouseTracking(True)
+        # 从收纳面板把卡片拖过来 = 加为常用启动。
+        # 这条路和"长按拖动排序"是**两套机制**：排序走的是
+        # `mousePressEvent` / `hold_notify` / `move_notify` 那条鼠标链路，
+        # 这里接的是 Qt 自己的拖放（QDrag / dropEvent），互不干扰。
+        self.setAcceptDrops(True)
+        self._drop_active = False
 
         self.loader = IconLoader(self, per_tick=3)
         self.loader.ready.connect(self._on_icon_ready)
 
         self._build_ui()
+        # 轻提示（加 / 移出常用启动的反馈）。必须是顶层小窗，见 DockToast。
+        self.toast = DockToast(self)
         self.apply_theme(self.dark)
         self.rebuild()
         self.reposition()
@@ -515,10 +607,10 @@ class DockBar(QWidget):
         # 有深色底板兜着还像一整条；底板一去，就变成上下两撮图标各自浮着，很散。
         # 所以「桌面整理 / 常用启动」和「＋ － ⚙ ✕」放进同一个 QHBoxLayout。
         self.main_row = QHBoxLayout()
-        self.main_row.setSpacing(3)
+        self.main_row.setSpacing(DOCK_GAP)
 
         # 应用区：会自动换行，加再多也不会把菜单栏撑出屏幕
-        self.apps_flow = FlowRow(self.surface, spacing=3)
+        self.apps_flow = FlowRow(self.surface, spacing=DOCK_GAP)
         self.main_row.addWidget(self.apps_flow)
 
         column.addLayout(self.main_row)
@@ -529,6 +621,85 @@ class DockBar(QWidget):
         # 控制按钮单独记一份：清空时只能摘掉它们，
         # **不能**顺手把 apps_flow 也从布局里拿掉（那样应用区就整个没了）
         self._control_buttons: "list[QWidget]" = []
+
+    # ------------------------------------------------------------------
+    # 阴影（见 DOCK_SHADOW_* 的说明）
+    # ------------------------------------------------------------------
+    def paintEvent(self, event) -> None:  # noqa: N802
+        """在菜单栏底下垫一层**很淡的影子**。
+
+        菜单栏是纯透明的（`#DockSurface` 必须保持 `background: transparent`，
+        见 theme 第 15 节），图标直接浮在壁纸上。浅色壁纸上浅色图标和浅色名字
+        会糊成一片，所以补一层几乎看不见的暗色晕：中心 alpha 只有 ~24/255，
+        越往外越淡 —— 看上去是"图标投在桌面上的影子"，而不是一条深色底板。
+
+        做法是几层同心圆角矩形，不是 `QGraphicsDropShadowEffect`：
+        后者每帧都要离屏渲染 + 模糊，而拖拽排序是 60fps 逐帧移动控件的。
+        """
+        super().paintEvent(event)
+        area = self.surface.geometry()
+        if area.isEmpty():
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        # 颜色取自 Design Token（深色主题的 shadow），alpha 由 DOCK_SHADOW_ALPHA 控制
+        shadow = QColor(theme_mod.DARK["shadow"])
+        radius = float(theme_mod.RADIUS["dock"] + DOCK_SHADOW_LAYERS
+                       * DOCK_SHADOW_SPREAD)
+        # 从最外层往里画：外圈 alpha 低，内圈一层层叠上去
+        for index in range(DOCK_SHADOW_LAYERS, 0, -1):
+            spread = index * DOCK_SHADOW_SPREAD
+            alpha = int(DOCK_SHADOW_ALPHA * index / DOCK_SHADOW_LAYERS)
+            shadow.setAlpha(alpha)
+            path = QPainterPath()
+            path.addRoundedRect(
+                area.left() - spread, area.top() - spread,
+                area.width() + spread * 2, area.height() + spread * 2,
+                radius, radius)
+            painter.fillPath(path, shadow)
+        painter.end()
+
+    def _set_drop_active(self, active: bool) -> None:
+        """拖拽悬停时给菜单栏描一圈虚线（动态属性 + 重新 polish，见 theme）。"""
+        active = bool(active)
+        if self._drop_active == active:
+            return
+        self._drop_active = active
+        for widget in (self.surface, self):
+            widget.setProperty("dropActive", active)
+            style = widget.style()
+            style.unpolish(widget)
+            style.polish(widget)
+            widget.update()
+
+    @staticmethod
+    def _set_icon_active(button: DockIcon, active: bool) -> None:
+        """给"被抓起来排序"的那个图标打/摘 `active` 标记。
+
+        样式走动态属性（`#DockIcon[active="true"]`）而不是内联样式表：
+        内联样式表的特异性更高，会把 `#DockIcon:hover` 整条盖掉。
+        """
+        button.setProperty("active", bool(active))
+        try:
+            style = button.style()
+            style.unpolish(button)
+            style.polish(button)
+            button.update()
+        except RuntimeError:            # 按钮已经被销毁（极端时序），不用管
+            pass
+
+    # ------------------------------------------------------------------
+    # 轻提示（加 / 移出常用启动的反馈，需求五）
+    # ------------------------------------------------------------------
+    def show_toast(self, text: str, kind: str = "ok") -> None:
+        """在菜单栏上方弹一条自动消失的提示（不用 Dialog）。"""
+        toast = getattr(self, "toast", None)
+        if toast is None:                    # 极端时序：还没建好
+            return
+        if self.isHidden():
+            return                           # 菜单栏收起来了，弹出来也没人看
+        toast.show_message(text, kind)
 
     def _clear_row(self) -> None:
         """清空应用区与控制按钮。"""
@@ -618,9 +789,7 @@ class DockBar(QWidget):
             exists = source is not None
             button = self._make_button(
                 icon_size=self._icon_size,
-                tooltip=f"{name}\n{path}"
-                        + ("" if exists else "\n（已失效）")
-                        + "\n（按住可拖动排序）",
+                tooltip=self._quick_tooltip(name, path, exists),
                 fallback_text=name,
                 fallback_kind=engine.kind_of(source or path) if exists else "other",
                 on_click=lambda _btn, p=path: self._launch(p),
@@ -837,8 +1006,9 @@ class DockBar(QWidget):
             nest.twin_path(path, self.cfg.desktop) or path)
         ok, reason = engine.launch(target)
         if not ok:
-            self.setToolTip(f"{path.name}：{reason}")
-            QTimer.singleShot(4000, lambda: self.setToolTip(""))
+            # 以前是把原因塞进 `setToolTip`——菜单栏是透明浮层，鼠标得停在
+            # 空白处才会弹，基本等于没提示。改成一条轻提示，直接看得见。
+            self.show_toast(f"{path.name}：{reason}", "warn")
 
     def clear_hover(self) -> None:
         """清掉整条菜单栏上所有按钮的 hover 高光。"""
@@ -875,6 +1045,7 @@ class DockBar(QWidget):
             self.cfg.remove_quick(path)
             self.quick_changed.emit()
             self.rebuild()
+            self.show_toast("✓ 已移出常用启动")
         elif chosen in (action_up, action_down):
             for index, candidate in enumerate(self.cfg.quick_items):
                 if candidate["path"] == entry["path"]:
@@ -901,14 +1072,43 @@ class DockBar(QWidget):
                 self, "选择要加入菜单栏的程序或文件", str(Path.home()),
                 "程序 (*.exe *.lnk *.bat *.cmd);;所有文件 (*.*)")
             if path:
-                target = Path(path)
-                if self.cfg.add_quick(target, target.stem):
-                    self.quick_changed.emit()
-                    self.rebuild()
+                self.add_quick_from_path(Path(path))
+
+    def add_quick_from_path(self, path: Path) -> bool:
+        """把一个路径加为常用启动。
+
+        拖放进来的、右键「添加常用软件…」里挑的、批量勾选的那些，
+        最终都汇到这一个入口 —— 成功之后统一"写配置 → 通知外面 → 重建
+        → 弹提示"，免得三处各写一遍顺序还不一样。
+        """
+        path = Path(path)
+        if self.cfg.is_quick(path):
+            self.show_toast("已经在常用启动里了", "warn")
+            return False
+        if not self.cfg.add_quick(path, self._quick_display_name(path)):
+            self.show_toast("加入常用启动失败", "warn")
+            return False
+        self.quick_changed.emit()
+        self.rebuild()
+        self.show_toast("✓ 已加入常用启动")
+        return True
 
     # ------------------------------------------------------------------
     # 常用启动：批量添加 / 批量删除
     # ------------------------------------------------------------------
+    def _quick_tooltip(self, name: str, path: Path, exists: bool = True) -> str:
+        """常用启动图标的 Tooltip：**完整名称** + 完整路径 + 一句能干什么。
+
+        按钮上那行名字是省略过的（`DockIcon.elide` 只留 6 个字），
+        长名字必须能在 Tooltip 里看到全的 —— 需求一里明确要求。
+        """
+        lines = [name, str(path)]
+        if not exists:
+            lines.append("（已失效：桌面和收纳目录里都找不到它）")
+        lines.append("")
+        lines.append("单击打开 · 右键更多 · 按住拖动排序")
+        return "\n".join(lines)
+
     def _quick_display_name(self, path: Path) -> str:
         show_ext = bool(self.cfg.get("show_extensions", False))
         return engine.display_name(path.name, False, show_ext)
@@ -950,7 +1150,7 @@ class DockBar(QWidget):
         self.quick_changed.emit()
         self.rebuild()
         if added:
-            self.setToolTip(f"已加入 {added} 项")
+            self.show_toast(f"✓ 已加入常用启动（{added} 项）")
 
     def remove_quick_dialog(self) -> None:
         """勾选多项，批量从菜单栏移除。"""
@@ -972,14 +1172,20 @@ class DockBar(QWidget):
         self.rebuild()
         self.quick_changed.emit()
         if removed:
-            self.setToolTip(f"已移除 {removed} 项")
+            self.show_toast(f"✓ 已移出常用启动（{removed} 项）")
 
     # ------------------------------------------------------------------
     # 主题 / 尺寸
     # ------------------------------------------------------------------
     def apply_theme(self, dark: bool = True) -> None:
         # Dock 固定深色（macOS 那种观感），不受应用主题影响
-        self.setStyleSheet(theme_mod.stylesheet(True))
+        sheet = theme_mod.stylesheet(True)
+        self.setStyleSheet(sheet)
+        # 轻提示是**独立的顶层小窗**，不会从菜单栏继承样式表，
+        # 得单独喂一份，否则 `#ToastOk` 那层淡底和圆角全都不生效。
+        toast = getattr(self, "toast", None)
+        if toast is not None:
+            toast.setStyleSheet(sheet)
         self.setWindowOpacity(float(self.cfg.get("dock_opacity", 0.97) or 0.97))
 
     def set_icon_size(self, size: int) -> None:
@@ -1064,6 +1270,10 @@ class DockBar(QWidget):
             self.raise_()
 
     def hide_bar(self) -> None:
+        # 提示是独立小窗，不跟着菜单栏一起隐藏就会孤零零挂在桌面上
+        toast = getattr(self, "toast", None)
+        if toast is not None:
+            toast.hide_now()
         self.hide()
 
     # ------------------------------------------------------------------
@@ -1134,6 +1344,7 @@ class DockBar(QWidget):
         self._reorder_button = button
         button.set_dragging(True)
         button.setDown(True)            # 按住的样子，提示"已经抓起来了"
+        self._set_icon_active(button, True)
         button.setCursor(Qt.CursorShape.ClosedHandCursor)
         self._reorder_from = self._app_index(button)
         self._reorder_to = self._reorder_from
@@ -1174,6 +1385,7 @@ class DockBar(QWidget):
         self._release_pos = QPoint(global_pos)
         if mode == "reorder":
             button.setDown(False)
+            self._set_icon_active(button, False)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             self._commit_reorder()
         elif mode == "window":
@@ -1238,6 +1450,10 @@ class DockBar(QWidget):
         self._anim_timer.stop()
         self._springs.clear()
         self._slots = []
+        if self._reorder_button is not None:
+            # 别把 `active` 高亮留在图标上：重建之后这批按钮就没了，
+            # 但"半路被打断"的那条路径里它们还活着（比如只是取消排序）。
+            self._set_icon_active(self._reorder_button, False)
         self._reorder_button = None
         self._settling = False
         if self._mode == "reorder":
@@ -1548,6 +1764,54 @@ class DockBar(QWidget):
         # 交给回弹流程：动画停下来时 `_on_anim_tick()` 会调 `_finish_settle()`
         self._settling = True
         self._start_anim()
+
+    # ------------------------------------------------------------------
+    # 拖入添加：从收纳面板把条目拖到菜单栏上（需求四）
+    #
+    # 这条路和"长按拖动排序"**互不干扰**：排序走的是 `mousePressEvent` /
+    # `hold_notify` / `move_notify` 那条鼠标链路（图标跟着光标走、别的图标让位），
+    # 这里接的是 Qt 自己的拖放（QDrag / dropEvent）。两套机制各自独立，
+    # 所以给菜单栏加"能收拖放"不需要动排序系统一个字节。
+    # ------------------------------------------------------------------
+    def _payload_from(self, event) -> str:
+        """从拖放事件里取出条目路径（不是我们自己的包就返回空串）。"""
+        data = event.mimeData()
+        if data is None or not data.hasFormat(DND_MIME):
+            return ""
+        try:
+            return bytes(data.data(DND_MIME)).decode("utf-8", "replace")
+        except Exception:
+            return ""
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if self._payload_from(event):
+            event.acceptProposedAction()
+            self._set_drop_active(True)
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        if self._payload_from(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802
+        self._set_drop_active(False)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        raw = self._payload_from(event)
+        self._set_drop_active(False)
+        if not raw:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        try:
+            path = Path(raw)
+        except (TypeError, ValueError):
+            return
+        self.add_quick_from_path(path)
 
     # ------------------------------------------------------------------
     # 拖动 / 右键

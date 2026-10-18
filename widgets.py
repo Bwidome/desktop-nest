@@ -36,6 +36,12 @@ FALLBACK_TILE_COLOR = theme.FALLBACK_TILE_COLOR
 # 品牌主色统一从主题取，避免同一串色值散落在多个文件里各写一遍
 BRAND_ACCENT = theme.BRAND_ACCENT
 
+#: 收纳面板把卡片拖到「常用启动」时携带的 MIME 类型。
+#: 放在这里（而不是 `desktop_browser`）是因为**底部菜单栏也要收这个包**：
+#: 从面板拖到 Dock 上同样等于"加为常用启动"。两个模块互相 import 会成环，
+#: 所以常量落在共用零件这一层，谁用谁取。
+DND_MIME = "application/x-desktop-nest-item"
+
 
 def letter_pixmap(text: str, color: str, size: int) -> QPixmap:
     """圈一个圆角色块 + 首字，作为图标的兜底。"""

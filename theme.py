@@ -890,6 +890,14 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
     border: none;
     border-radius: {R['dock']}px;
 }}
+/* 把收纳面板里的条目**拖到菜单栏上**＝加为常用启动。
+   悬停期间给一圈虚线主色描边，说清"松手就加到这里"；
+   底板本身仍然保持透明（`background: transparent` 不能丢）。 */
+#DockSurface[dropActive="true"] {{
+    background: transparent;
+    border: 1px dashed {c['accent']};
+    border-radius: {R['dock']}px;
+}}
 #DockIcon {{
     background: transparent;
     border: 1px solid transparent;
@@ -898,13 +906,26 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
     /* 底板透明之后，图标下面的名字要自己扛住可读性。
        绝大多数桌面壁纸是中到深的，所以用浅色字；再深就靠 tooltip。 */
     color: #EAF0FA;
+    /* 名字比正文小一档：一排十几个图标，跟着正文字号会显得吵，
+       也会把每个格子撑得很宽（图标间距就白调了）。 */
+    font-size: {F['xs']}pt;
 }}
+/* Hover / Active 都是**中性半透明灰**：纯白在浅壁纸上消失、纯黑在深壁纸上消失，
+   灰的两种壁纸下都辨得出来。刻意压得比原来淡——菜单栏是常驻的，
+   悬停太抢眼会像"一直在被选中"。 */
 #DockIcon:hover {{
-    background: rgba(84, 90, 104, 0.42);
-    border-color: rgba(255, 255, 255, 60);
+    background: rgba(120, 128, 148, 0.30);
+    border-color: rgba(255, 255, 255, 46);
 }}
 #DockIcon:pressed {{
-    background: rgba(84, 90, 104, 0.62);
+    background: rgba(120, 128, 148, 0.46);
+    border-color: rgba(255, 255, 255, 70);
+}}
+/* 长按拖起来排序的那个图标（动态属性，见 dock.DockBar._on_icon_hold）：
+   底色更实一档，明确"它现在被抓着"，和让位的那些区分开。 */
+#DockIcon[active="true"] {{
+    background: rgba(120, 128, 148, 0.46);
+    border-color: rgba(255, 255, 255, 90);
 }}
 /* 长按拖动排序时，插在目标位置的那根指示线。
    底板是纯透明的，所以颜色必须自己够亮——用品牌蓝打底 + 一圈白边，
@@ -949,14 +970,14 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
 #AppButton {{
     background: transparent;
     border: 1px solid transparent;
-    border-radius: {R['lg']}px;
+    border-radius: {R['xl']}px;
     color: {c['text']};
     font-size: {F['xs']}pt;
     padding: 2px;
 }}
 #AppButton:hover {{
     background: {c['hover']};
-    border-color: {c['border']};
+    border-color: {c['border_strong']};
 }}
 #AppButton:pressed {{
     background: {c['pressed']};
