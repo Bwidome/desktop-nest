@@ -72,16 +72,10 @@ MIN_MARGIN = 8
 #: 换行之后行内间距和行间间距不一样的话，第二行会看着比第一行挤。
 DOCK_GAP = 6
 
-# --------------------------------------------------------------------------
-# 菜单栏底下那层"影子"（画在 paintEvent 里，不是 QSS 也不是 QGraphicsEffect）
-# --------------------------------------------------------------------------
-#: 影子由几层同心圆角矩形叠出来，最外一层 alpha 最低。
-#: 为什么不用 `QGraphicsDropShadowEffect`：它每帧都要把整个菜单栏离屏渲染
-#: 再模糊一遍，而拖拽排序是 60fps 逐帧移动控件的 —— 那就是每帧一次全条模糊。
-#: 这里只是几个圆角矩形填充，代价可以忽略，观感够用（要的是"浮着"，不是"投影"）。
-DOCK_SHADOW_LAYERS = 3
-DOCK_SHADOW_ALPHA = 24         # 最内一层的 alpha（/255），很淡，浅壁纸上也压不脏
-DOCK_SHADOW_SPREAD = 2         # 每往外一层多扩几像素（别超过窗口留白，否则被裁）
+#: 菜单栏**不画底板、不画阴影**：底板纯透明，图标直接浮在桌面上。
+#: （Phase 4 试过在 `paintEvent` 里垫一层很淡的同心圆角矩形当"影子"，
+#:  但浅色壁纸上看就是一块半透明板子——用户明确要求回到纯透明的观感，
+#:  所以这里不再有任何绘制。要加回来请先确认壁纸是深色的。）
 
 # --------------------------------------------------------------------------
 # 排序让位的弹簧手感（积分器在 springs.py）
@@ -623,42 +617,14 @@ class DockBar(QWidget):
         self._control_buttons: "list[QWidget]" = []
 
     # ------------------------------------------------------------------
-    # 阴影（见 DOCK_SHADOW_* 的说明）
+    # 底板：纯透明，**什么都不画**
     # ------------------------------------------------------------------
-    def paintEvent(self, event) -> None:  # noqa: N802
-        """在菜单栏底下垫一层**很淡的影子**。
-
-        菜单栏是纯透明的（`#DockSurface` 必须保持 `background: transparent`，
-        见 theme 第 15 节），图标直接浮在壁纸上。浅色壁纸上浅色图标和浅色名字
-        会糊成一片，所以补一层几乎看不见的暗色晕：中心 alpha 只有 ~24/255，
-        越往外越淡 —— 看上去是"图标投在桌面上的影子"，而不是一条深色底板。
-
-        做法是几层同心圆角矩形，不是 `QGraphicsDropShadowEffect`：
-        后者每帧都要离屏渲染 + 模糊，而拖拽排序是 60fps 逐帧移动控件的。
-        """
-        super().paintEvent(event)
-        area = self.surface.geometry()
-        if area.isEmpty():
-            return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(Qt.PenStyle.NoPen)
-        # 颜色取自 Design Token（深色主题的 shadow），alpha 由 DOCK_SHADOW_ALPHA 控制
-        shadow = QColor(theme_mod.DARK["shadow"])
-        radius = float(theme_mod.RADIUS["dock"] + DOCK_SHADOW_LAYERS
-                       * DOCK_SHADOW_SPREAD)
-        # 从最外层往里画：外圈 alpha 低，内圈一层层叠上去
-        for index in range(DOCK_SHADOW_LAYERS, 0, -1):
-            spread = index * DOCK_SHADOW_SPREAD
-            alpha = int(DOCK_SHADOW_ALPHA * index / DOCK_SHADOW_LAYERS)
-            shadow.setAlpha(alpha)
-            path = QPainterPath()
-            path.addRoundedRect(
-                area.left() - spread, area.top() - spread,
-                area.width() + spread * 2, area.height() + spread * 2,
-                radius, radius)
-            painter.fillPath(path, shadow)
-        painter.end()
+    # 这里刻意没有 `paintEvent`。菜单栏是一层纯透明浮层（`#DockSurface` 是
+    # `background: transparent`，见 theme 第 15 节），图标和名字直接浮在桌面上。
+    #
+    # Phase 4 曾在这里垫过一层很淡的同心圆角矩形当"影子"，想给浅壁纸兜底；
+    # 实际观感是"图标底下多了一块半透明板子"，反而回到了要删掉的那种底板。
+    # 现在一律不画：要浮着的感觉，靠图标本身和间距就够了。
 
     def _set_drop_active(self, active: bool) -> None:
         """拖拽悬停时给菜单栏描一圈虚线（动态属性 + 重新 polish，见 theme）。"""

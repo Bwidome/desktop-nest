@@ -237,7 +237,7 @@ def main() -> int:
     dock.show_bar()
     pump(app, 0.8)
 
-    section("6. Dock：图标间距 / 背景 / 阴影")
+    section("6. Dock：图标间距 / 背景（纯透明）")
     check("应用区图标间距放宽到 6（原来是 3）",
           dock.apps_flow._spacing == dock_mod.DOCK_GAP == 6,       # noqa: SLF001
           str(dock.apps_flow._spacing))                            # noqa: SLF001
@@ -245,22 +245,30 @@ def main() -> int:
           dock.main_row.spacing() == dock_mod.DOCK_GAP,
           str(dock.main_row.spacing()))
     sheet = dock.styleSheet()
-    check("底板仍然是纯透明（不是又加回一条深色板）",
+    check("底板是纯透明（不是又加回一条深色板）",
           "#DockSurface" in sheet and "background: transparent" in sheet)
-    check("阴影是画出来的，不是 QGraphicsEffect（拖拽时不能每帧模糊）",
+    check("没有挂 QGraphicsEffect（拖拽时不能每帧全条模糊）",
           not dock.graphicsEffect() and not dock.surface.graphicsEffect())
-    check("阴影参数克制（最内层 alpha < 40/255）",
-          dock_mod.DOCK_SHADOW_ALPHA < 40, str(dock_mod.DOCK_SHADOW_ALPHA))
+    # 回归：Phase 4 曾在这里画过一层"影子"，浅壁纸上看就是一块半透明板子。
+    # 用户要求回到纯透明，所以钉死"菜单栏自己什么都不画"。
+    check("菜单栏自己不画任何东西（没有覆盖 paintEvent）",
+          "paintEvent" not in vars(dock_mod.DockBar))
     pix = dock.grab()
     pix.setDevicePixelRatio(1.0)
     image = pix.toImage()
     surface = dock.surface.geometry()
     probe = image.pixelColor(surface.x() + surface.width() // 2,
                              surface.y() + 3)
-    check("实测：图标上方那一带确实有一层很淡的暗色（阴影生效）",
-          probe.alpha() > 0, f"alpha={probe.alpha()}")
-    check("实测：阴影很淡，不至于变成一条底板（alpha <= 120）",
-          probe.alpha() <= 120, f"alpha={probe.alpha()}")
+    check("实测：图标上方那一带完全透明（直接透出壁纸）",
+          probe.alpha() == 0, f"alpha={probe.alpha()}")
+    # 图标之间那条缝也必须是透的——有底板的话这里会先被填上色
+    first_btn, second_btn = dock._app_buttons[0], dock._app_buttons[1]
+    left = first_btn.mapTo(dock, QPoint(first_btn.width(), 0)).x()
+    right = second_btn.mapTo(dock, QPoint(0, 0)).x()
+    middle_y = first_btn.mapTo(dock, QPoint(0, first_btn.height() // 2)).y()
+    gap = image.pixelColor((left + right) // 2, middle_y)
+    check("实测：两个图标之间的缝也是全透明的",
+          gap.alpha() == 0, f"alpha={gap.alpha()}")
 
     section("7. Dock：Hover / Active 状态")
     check("样式表里有 DockIcon 的 hover 规则", "#DockIcon:hover" in sheet)
