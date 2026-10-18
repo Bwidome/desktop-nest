@@ -625,12 +625,59 @@ def take_from_desktop(desktop: Path, *, progress: "Progress | None" = None,
     return result
 
 
+def _restore_target(entry: Path, desktop: Path,
+                    sources: "dict[str, str]") -> "tuple[Path, str]":
+    """算"这一项该还原到哪里"：返回 (目标桌面目录, 目标文件名)。
+
+    抽出来是为了让**预检**（`restore_plan`）和**真正搬运**用同一套算法——
+    否则界面提示"会放到这里"，实际却放到那里，是最难查的那类 bug。
+    """
+    origin = desktop_for_source(sources.get(entry.name, ""))
+    target_name = entry.name
+    if origin != desktop and "（公用）" in entry.name:
+        target_name = entry.name.replace("（公用）", "")   # 去掉区分用后缀
+    return origin, target_name
+
+
+def restore_plan(desktop: Path) -> "list[dict]":
+    """只读预检：每一项会还原到哪里、那个位置是不是已经有同名文件了。
+
+    **一个文件都不动**。界面拿它来决定"还原之前要不要先问用户冲突怎么处理"。
+    列表顺序与 `restore_to_desktop()` 一致（文件夹在前，同类按名字排）。
+    """
+    store = desktop_store()
+    if not safety.safe_exists(store):
+        return []
+    try:
+        entries = sorted(store.iterdir(),
+                         key=lambda p: (not safety.safe_is_dir(p), p.name.lower()))
+    except OSError:
+        return []
+    sources = read_sources()
+    plan: "list[dict]" = []
+    for entry in entries:
+        origin, target_name = _restore_target(entry, desktop, sources)
+        target = origin / target_name
+        plan.append({
+            "name": entry.name,
+            "entry": entry,
+            "target": target,
+            # 同名冲突：目标位置已经有东西了（还原时会走 _unique 自动改名）
+            "exists": safety.safe_exists(target),
+        })
+    return plan
+
+
 def restore_to_desktop(desktop: Path, *, progress: "Progress | None" = None,
-                       should_cancel: "Callable[[], bool] | None" = None) -> MoveResult:
+                       should_cancel: "Callable[[], bool] | None" = None,
+                       skip: "set[str] | None" = None) -> MoveResult:
     """把收纳目录里的东西全部搬回**各自原来的桌面**。
 
     公共桌面的快捷方式送回公共桌面，个人桌面的送回个人桌面——
     否则公用快捷方式会被挪到个人桌面，其他用户就看不到了。
+
+    `skip` 里点名的条目**原地不动**（记进 `skipped`）。界面用它实现
+    "桌面上已经有同名文件 → 这一项先不还原"。
     """
     started = time.time()
     result = MoveResult()
@@ -659,11 +706,11 @@ def restore_to_desktop(desktop: Path, *, progress: "Progress | None" = None,
             break
         if progress:
             progress(index, total, entry.name)
+        if skip and entry.name in skip:
+            result.skipped.append((entry.name, "已跳过（桌面已有同名文件）"))
+            continue
         # 送回原处；公共桌面不可写时退回个人桌面，至少不把文件丢了
-        origin = desktop_for_source(sources.get(entry.name, ""))
-        target_name = entry.name
-        if origin != desktop and "（公用）" in entry.name:
-            target_name = entry.name.replace("（公用）", "")   # 去掉区分用后缀
+        origin, target_name = _restore_target(entry, desktop, sources)
         try:
             if not safety.safe_exists(origin):
                 origin.mkdir(parents=True, exist_ok=True)

@@ -46,9 +46,9 @@ try:
         QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
         QFileDialog, QFrame, QGraphicsDropShadowEffect, QGraphicsOpacityEffect,
         QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
-        QListWidget, QListWidgetItem, QMenu, QMessageBox, QPushButton,
-        QScrollArea, QSizePolicy, QSystemTrayIcon, QTabWidget, QToolButton,
-        QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+        QListWidget, QListWidgetItem, QMenu, QMessageBox, QProgressBar,
+        QPushButton, QScrollArea, QSizePolicy, QSystemTrayIcon, QTabWidget,
+        QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
     )
 
     BACKEND = "PyQt6"
@@ -72,7 +72,7 @@ except ImportError as exc:  # pragma: no cover
             QFileDialog, QFrame, QGraphicsDropShadowEffect,
             QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QHeaderView,
             QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu,
-            QMessageBox, QPushButton, QScrollArea, QSizePolicy,
+            QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
             QSystemTrayIcon, QTabWidget, QToolButton, QTreeWidget,
             QTreeWidgetItem, QVBoxLayout, QWidget,
         )

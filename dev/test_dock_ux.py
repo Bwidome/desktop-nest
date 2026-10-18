@@ -424,7 +424,7 @@ def main() -> int:
     check("重复拖入不会加出第二份",
           len(dock._app_buttons) == before + 1, str(len(dock._app_buttons)))
     check("重复拖入提示「已经在常用启动里了」",
-          dock.toast.text() == "已经在常用启动里了", dock.toast.text())
+          dock.toast.text() == "⚠ 已经在常用启动里了", dock.toast.text())
     check("重复拖入用警告样式", dock.toast.objectName() == "ToastWarn",
           dock.toast.objectName())
 

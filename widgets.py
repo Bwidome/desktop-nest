@@ -13,10 +13,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from qt_compat import (
-    QCheckBox, QColor, QDialog, QEvent, QFont, QFontMetrics,
+    QCheckBox, QColor, QDialog, QEvent, QFont, QFontMetrics, QFrame,
     QGraphicsOpacityEffect, QHBoxLayout, QIcon, QImage, QLabel, QPainter,
-    QPainterPath, QPalette, QPen, QPixmap, QPointF, QPropertyAnimation,
-    QPushButton, QRect, QScrollArea, QSize, Qt, QTimer, QVBoxLayout, QWidget,
+    QPainterPath, QPalette, QPen, QPixmap, QPointF, QProgressBar,
+    QPropertyAnimation, QPushButton, QRect, QScrollArea, QSize, QSizePolicy,
+    QToolButton, Qt, QTimer, QVBoxLayout, QWidget,
     Signal,
 )
 
@@ -362,6 +363,11 @@ class Toast(QLabel):
 
     #: kind → objectName。样式在 theme.py 的「Tooltip + Toast」一节
     _KINDS = {"ok": "ToastOk", "warn": "ToastWarn", "danger": "ToastDanger"}
+    #: kind → 前缀符号（Phase 5 需求五：成功 ✓ / 警告 ⚠ / 失败 ×）。
+    #: 由 Toast 自己补，调用方只写正文——否则各处手写符号，迟早会写出
+    #: "⚠ 已加入常用启动"这种自相矛盾的组合。
+    _GLYPHS = {"ok": "✓", "warn": "⚠", "danger": "×"}
+    _ALL_GLYPHS = ("✓", "⚠", "×")
 
     def __init__(self, parent=None, *, duration: int = 0):
         super().__init__(parent)
@@ -394,6 +400,23 @@ class Toast(QLabel):
         return super().eventFilter(obj, event)
 
     # ------------------------------------------------------------------
+    @classmethod
+    def mark(cls, text: str, kind: str = "ok") -> str:
+        """给正文补上对应 kind 的前缀符号（已有符号就先摘掉再补）。
+
+        单独抽成类方法，是为了让"没有 Toast 可弹"的地方（比如主程序
+        要在托盘气泡里说同一句话）也能拿到一模一样的文案。
+        """
+        body = (text or "").strip()
+        glyph = cls._GLYPHS.get(kind)
+        if not glyph:
+            return body
+        for mark in cls._ALL_GLYPHS:
+            if body.startswith(mark):
+                body = body[len(mark):].lstrip()
+                break
+        return f"{glyph} {body}" if body else glyph
+
     def show_message(self, text: str, kind: str = "ok", *,
                      animate: bool = True) -> None:
         """显示一条提示。`kind` 取 `ok` / `warn` / `danger` / 其它（中性）。"""
@@ -401,7 +424,8 @@ class Toast(QLabel):
         style = self.style()
         style.unpolish(self)
         style.polish(self)
-        self.setText(text)
+        self.setText(self.mark(text, kind))
+        self._fit_width()
         self.adjustSize()
         self.place()
         self._fading_out = False
@@ -409,6 +433,27 @@ class Toast(QLabel):
         self.raise_()
         self._fade_to(1.0, self.FADE_IN, animate)
         self._timer.start(self._stay)
+
+    def _fit_width(self) -> None:
+        """一行放得下就别折行。
+
+        `QLabel(wordWrap=True)` 的 `sizeHint()` 会往"接近方形"的方向估，
+        于是一句「成功 58 项，失败 2 项」也能被折成两行——提示越短越该是一行。
+        这里按字体实测宽度决定：放得下就关掉折行并定宽，放不下才允许折。
+        """
+        parent = self.parentWidget()
+        limit = max(160, (parent.width() if parent is not None else 720) - 48)
+        metrics = QFontMetrics(self.font())
+        widest = 0
+        for line in (self.text() or "").splitlines():
+            widest = max(widest, metrics.horizontalAdvance(line))
+        if widest and widest + 30 <= limit:
+            self.setWordWrap(False)
+            self.setFixedWidth(widest + 30)
+        else:
+            self.setWordWrap(True)
+            self.setMinimumWidth(0)
+            self.setMaximumWidth(16777215)
 
     def dismiss(self) -> None:
         """淡出并隐藏（计时到了会自己调）。"""
@@ -457,6 +502,276 @@ class Toast(QLabel):
         if self._fading_out:
             self._fading_out = False
             self.hide()
+
+
+class OpRow(QWidget):
+    """状态条里的一条失败记录：名称 + 原因 + [重试] [跳过]。
+
+    需求四：「无法访问此项目 / 可能原因：权限不足 / 文件正在使用 /
+    提供 [重试] [跳过]」。做成列表里的一行而不是一个弹窗——
+    一批 60 项里挂了两项，弹两次窗会把人烦死；列出来让他自己决定更省事。
+    """
+
+    retry_requested = Signal(str)
+    skip_requested = Signal(str)
+
+    def __init__(self, name: str, reason: str, *, retryable: bool = True,
+                 parent=None):
+        super().__init__(parent)
+        self.setObjectName("OpRow")
+        self.item_name = name
+        self.retryable = bool(retryable)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(8, 2, 4, 2)
+        row.setSpacing(8)
+
+        label = ElidedLabel(name, 1, align=Qt.AlignmentFlag.AlignLeft
+                            | Qt.AlignmentFlag.AlignVCenter)
+        label.setObjectName("OpName")
+        label.setToolTip(name)
+        label.setSizePolicy(QSizePolicy.Policy.Ignored,
+                            QSizePolicy.Policy.Preferred)
+        row.addWidget(label, 3)
+
+        why = ElidedLabel(reason or "未知原因", 1,
+                          align=Qt.AlignmentFlag.AlignLeft
+                          | Qt.AlignmentFlag.AlignVCenter)
+        why.setObjectName("OpReason")
+        why.setToolTip(reason or "")
+        why.setSizePolicy(QSizePolicy.Policy.Ignored,
+                          QSizePolicy.Policy.Preferred)
+        row.addWidget(why, 4)
+
+        if retryable:
+            retry = QPushButton("重试")
+            retry.setObjectName("OpAction")
+            retry.setCursor(Qt.CursorShape.PointingHandCursor)
+            retry.setToolTip("再试一次这一项")
+            # clicked 会塞一个 bool 进来，槽里参数对不上会静默失效
+            retry.clicked.connect(lambda _c=False: self.retry_requested.emit(self.item_name))
+            row.addWidget(retry)
+
+        skip = QPushButton("跳过")
+        skip.setObjectName("OpAction")
+        skip.setCursor(Qt.CursorShape.PointingHandCursor)
+        skip.setToolTip("这一项先不管（文件留在原处，不会被删）")
+        skip.clicked.connect(lambda _c=False: self.skip_requested.emit(self.item_name))
+        row.addWidget(skip)
+
+        # 行高按字高定死。**不要**让父控件去问 `sizeHint()`：`ElidedLabel` 会按
+        # "折行后的高度"估，实测一条只有 22px 的行能报到 256px，状态条照着算
+        # 就会在明细下面空出一大片。
+        self.setFixedHeight(max(26, QFontMetrics(skip.font()).height() + 12))
+
+
+class OperationBanner(QFrame):
+    """操作状态条：进度 → 结果，一条不占地方的横条。
+
+    三种形态（`state` 动态属性，样式见 theme 第 23 节）：
+
+    * `progress` —— 「正在收纳…」+ `12 / 60` + 细进度条；
+    * `warn`     —— 「部分项目处理失败」+ `成功 58 · 失败 2` + [查看详情]；
+    * `error`    —— 一项都没成，同上但换成危险色。
+
+    为什么不弹窗：收纳/还原是**批量**动作，跑到一半弹个模态框，界面就停在
+    那里不动了；进度条本身是"不阻塞"的反馈。失败明细也留在条里展开，
+    用户想看重试就点，不想看就继续干别的。
+    """
+
+    retry_requested = Signal(str)
+    skip_requested = Signal(str)
+
+    #: 明细区最多多高（再多就在里面滚动）
+    DETAIL_MAX = 132
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("OpBanner")
+        self.setProperty("state", "progress")
+        self._rows: "list[QWidget]" = []
+        self._expanded = False
+        self._moved = 0
+        self._failed = 0
+        self._skipped = 0
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(13, 9, 13, 9)
+        outer.setSpacing(7)
+
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        self.title = QLabel("")
+        self.title.setObjectName("OpTitle")
+        head.addWidget(self.title)
+        head.addStretch(1)
+
+        self.count = QLabel("")
+        self.count.setObjectName("OpCount")
+        head.addWidget(self.count)
+
+        self.link = QToolButton()
+        self.link.setObjectName("OpLink")
+        self.link.setText("查看详情")
+        self.link.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.link.setVisible(False)
+        self.link.clicked.connect(lambda _c=False: self.toggle_detail())
+        head.addWidget(self.link)
+        outer.addLayout(head)
+
+        self.bar = QProgressBar()
+        self.bar.setObjectName("OpBar")
+        self.bar.setTextVisible(False)
+        self.bar.setRange(0, 100)
+        self.bar.setValue(0)
+        outer.addWidget(self.bar)
+
+        self.detail = QScrollArea()
+        self.detail.setObjectName("OpDetail")
+        self.detail.setWidgetResizable(True)
+        self.detail.setFrameShape(QFrame.Shape.NoFrame)
+        self.detail.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.detail.setMaximumHeight(self.DETAIL_MAX)
+        self.detail.setVisible(False)
+        inner = QWidget()
+        inner.setObjectName("OpDetailBody")
+        self._rows_layout = QVBoxLayout(inner)
+        self._rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._rows_layout.setSpacing(2)
+        self._rows_layout.addStretch(1)
+        self.detail.setWidget(inner)
+        outer.addWidget(self.detail)
+
+        self.setVisible(False)
+
+    # ------------------------------------------------------------------
+    def begin(self, text: str, total: int) -> None:
+        """进入"正在做"状态。"""
+        self._clear_rows()
+        self._expanded = False
+        self._moved = self._failed = self._skipped = 0
+        self.detail.setVisible(False)
+        self.link.setVisible(False)
+        self.link.setText("查看详情")
+        self._set_state("progress")
+        self.title.setText(text)
+        self.count.setText(f"0 / {max(0, int(total))}")
+        self.bar.setRange(0, max(1, int(total)))
+        self.bar.setValue(0)
+        self.bar.setVisible(True)
+        self.setVisible(True)
+
+    def set_progress(self, index: int, total: int, _name: str = "") -> None:
+        """推进一格。`_name` 只是为了让它可以直接当 `nest` 的 progress 回调。"""
+        total = max(0, int(total))
+        self.count.setText(f"{min(int(index), total)} / {total}")
+        self.bar.setRange(0, max(1, total))
+        self.bar.setValue(min(int(index), total))
+
+    def show_failure(self, title: str, moved: int,
+                     failed: "list[tuple[str, str]]",
+                     skipped: "list[tuple[str, str]] | None" = None) -> None:
+        """显示"部分项目处理失败"。`failed` 是 [(名称, 原因)]。"""
+        self._clear_rows()
+        skipped = skipped or []
+        self._moved = int(moved)
+        self._failed = len(failed)
+        self._skipped = len(skipped)
+        self.bar.setVisible(False)
+        self._set_state("warn" if moved else "error")
+        self.title.setText(title)
+        self._refresh_count()
+        for name, reason in failed:
+            row = OpRow(name, reason)
+            row.retry_requested.connect(self.retry_requested.emit)
+            row.skip_requested.connect(self.skip_requested.emit)
+            self._rows_layout.insertWidget(self._rows_layout.count() - 1, row)
+            self._rows.append(row)
+        for name, reason in skipped:
+            row = OpRow(name, reason, retryable=False)
+            row.skip_requested.connect(self.skip_requested.emit)
+            self._rows_layout.insertWidget(self._rows_layout.count() - 1, row)
+            self._rows.append(row)
+        self.link.setVisible(bool(self._rows))
+        self.link.setText("收起详情" if self._expanded else "查看详情")
+        self._fit_detail()
+        self.detail.setVisible(self._expanded and bool(self._rows))
+        self.setVisible(True)
+
+    def drop_row(self, name: str) -> None:
+        """把某一项从明细里划掉（用户点了「跳过」/ 重试成功了）。"""
+        for row in list(self._rows):
+            if getattr(row, "item_name", "") == name:
+                self._rows.remove(row)
+                self._rows_layout.removeWidget(row)
+                row.setParent(None)
+                row.deleteLater()
+                if getattr(row, "retryable", True):
+                    self._failed = max(0, getattr(self, "_failed", 1) - 1)
+                else:
+                    self._skipped = max(0, self._skipped - 1)
+                break
+        self._refresh_count()
+        if not self._rows:
+            self.link.setVisible(False)
+            self.detail.setVisible(False)
+            self._expanded = False
+        else:
+            self._fit_detail()
+
+    def _refresh_count(self) -> None:
+        parts = [f"成功 {self._moved}",
+                 f"失败 {getattr(self, '_failed', 0)}"]
+        if self._skipped:
+            parts.append(f"跳过 {self._skipped}")
+        self.count.setText(" · ".join(parts))
+
+    def hide_banner(self) -> None:
+        self._clear_rows()
+        self._expanded = False
+        self.detail.setVisible(False)
+        self.setVisible(False)
+
+    def toggle_detail(self) -> None:
+        if not self._rows:
+            return
+        self._expanded = not self._expanded
+        self._fit_detail()
+        self.detail.setVisible(self._expanded)
+        self.link.setText("收起详情" if self._expanded else "查看详情")
+
+    def _fit_detail(self) -> None:
+        """明细区按内容定高。
+
+        不这么做的话，`QScrollArea` 会按自己的默认 sizeHint（256×192）要地方，
+        三条记录也撑出一大块空白——状态条本来是为了"少占地方"才做的。
+        """
+        if not self._rows:
+            self.detail.setFixedHeight(0)
+            return
+        row_h = max(row.minimumHeight() for row in self._rows)
+        total = row_h * len(self._rows) + 2 * (len(self._rows) - 1) + 6
+        self.detail.setFixedHeight(min(self.DETAIL_MAX, total))
+
+    # ------------------------------------------------------------------
+    @property
+    def row_count(self) -> int:
+        """当前列了几条明细（自检要看这个）。"""
+        return len(self._rows)
+
+    def _clear_rows(self) -> None:
+        for row in self._rows:
+            self._rows_layout.removeWidget(row)
+            row.setParent(None)
+            row.deleteLater()
+        self._rows.clear()
+
+    def _set_state(self, state: str) -> None:
+        self.setProperty("state", state)
+        style = self.style()
+        style.unpolish(self)
+        style.polish(self)
+        self.update()
 
 
 def clear_hover(widget) -> None:

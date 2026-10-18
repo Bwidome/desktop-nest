@@ -80,6 +80,60 @@ class ScanWorker(QThread):
         self.done.emit(items, history, counts, error)
 
 
+class OperationWorker(QThread):
+    """后台搬运：收纳 / 还原跑在子线程里，主线程只管画进度。
+
+    为什么不在主线程里搬：一次 60 项，跨分区的那些要"复制 → 校验 → 删源"，
+    全部做完可能要好几秒。主线程一卡，进度条根本不会重绘，
+    用户看到的就是"点了没反应，然后突然全好了"——这正是需求一要去掉的东西。
+
+    搬运本身只碰文件系统、不碰 Qt 对象，所以放子线程是安全的；
+    `progress` 回调通过信号回到主线程，界面更新仍然发生在主线程。
+    """
+
+    progressed = Signal(int, int, str)      # 第几项 / 共几项 / 名称
+    finished = Signal(object, str)          # MoveResult, kind
+    crashed = Signal(str, str)              # 错误描述, kind
+
+    def __init__(self, desktop: Path, kind: str, *, skip=None, items=None,
+                 parent=None):
+        super().__init__(parent)
+        self.desktop = Path(desktop)
+        self.kind = kind
+        self.skip = set(skip or ())
+        self.items = list(items) if items is not None else None
+
+    def run(self) -> None:  # noqa: D102
+        try:
+            if self.kind == "take":
+                result = nest.take_from_desktop(
+                    self.desktop, progress=self._progress, items=self.items)
+            else:
+                result = nest.restore_to_desktop(
+                    self.desktop, progress=self._progress, skip=self.skip)
+        except Exception as exc:            # noqa: BLE001 - 子线程里的异常必须捞住
+            config.log(f"{self.kind} 失败：{type(exc).__name__}: {exc}")
+            self.crashed.emit(f"{type(exc).__name__}: {exc}", self.kind)
+            return
+        self.finished.emit(result, self.kind)
+
+    def _progress(self, index: int, total: int, name: str) -> None:
+        self.progressed.emit(index, total, name)
+
+
+class _PathItem:
+    """喂给 `nest.take_from_desktop(items=...)` 的最小对象。
+
+    那个入口只用到 `.path` / `.name` / `.source` 三个属性；为了"替换冲突"
+    单独去构造一个完整的 `engine.RepoItem`（要算大小、类型、图标）没必要。
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.name = self.path.name
+        self.source = ""
+
+
 # --------------------------------------------------------------------------
 # 主程序
 # --------------------------------------------------------------------------
@@ -96,6 +150,9 @@ class TrayApp(QWidget):
         self.history: "list[dict]" = []
         self.counts: "dict[str, int]" = {}
         self._scan: "ScanWorker | None" = None
+        # 正在跑的批量搬运（收纳 / 还原）。同一时间只允许一个。
+        self._op: "OperationWorker | None" = None
+        self._last_op_kind = "take"
         self._quitting = False
         self._repository_note = ""
         self._dock_hidden_for_fullscreen = False
@@ -116,6 +173,9 @@ class TrayApp(QWidget):
         self.panel.request_quit.connect(self.quit_app)
         self.panel.quick_changed.connect(self._on_quick_changed)
         self.panel.extensions_changed.connect(self._on_extensions_changed)
+        # Phase 5：失败明细里的「重试 / 跳过」
+        self.panel.retry_item.connect(self._on_retry_item)
+        self.panel.skip_item.connect(self._on_skip_item)
 
         # ---- 收纳面板（Dock 左边第一个控件）----
         self.desktop_browser = DesktopBrowser(cfg)
@@ -860,57 +920,194 @@ class TrayApp(QWidget):
         except Exception:
             pass
 
-    def restore_desktop(self) -> None:
-        """把收纳目录里的全部内容（含文件夹）还原回桌面。"""
-        items = nest.list_nest_items()
-        # shell 位置映射只读一次（逐条调 shell_path_for 会让每个条目读一遍 links.json）
-        shell_names = nest.shell_path_map()
-        content = [i for i in items if not shell_names.get(i.path.stem)]
-        if not content:
-            QMessageBox.information(self, "还原桌面", "收纳目录里没有可还原的内容。")
-            return
-        folders = [i for i in content if i.is_dir]
-        files = [i for i in content if not i.is_dir]
-        answer = QMessageBox.question(
-            self, "还原桌面",
-            f"把收纳的 {len(content)} 项全部搬回桌面？\n\n"
-            f"目标：{self.cfg.desktop}\n"
-            f"其中：文件 {len(files)} 个"
-            + (f"，文件夹 {len(folders)} 个（连同里面的内容一起搬回）" if folders else "")
-            + "\n\n文件只是移动，不会被删除；重名会自动加序号。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes)
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        result = nest.restore_to_desktop(self.cfg.desktop)
-        self._show_desktop_icons()
-        self.cfg.set("nest_active", False)
-        self.refresh()
-        message = result.summary()
-        if result.failed:
-            message += "\n\n未能还原：\n" + "\n".join(
-                f"· {n}：{r}" for n, r in result.failed[:8])
-            QMessageBox.warning(self, "还原桌面", message)
-        else:
-            QMessageBox.information(self, "还原桌面", message)
+    # ------------------------------------------------------------------
+    # 收纳 / 还原（Phase 5：后台跑 + 进度 + 冲突 + 失败明细）
+    #
+    # 共同点：**核心搬运逻辑一行没改**，全部复用 `nest.take_from_desktop` /
+    # `nest.restore_to_desktop`；这里只负责"什么时候调、怎么把过程说出来"。
+    # ------------------------------------------------------------------
+    def _op_running(self) -> bool:
+        return self._op is not None and self._op.isRunning()
 
     def take_desktop_now(self) -> None:
         """手动把桌面上的东西收进收纳目录。"""
+        if self._op_running():
+            return
         pending = nest.desktop_item_count(self.cfg.desktop)
         if pending == 0:
-            QMessageBox.information(self, "收纳桌面", "桌面上没有需要收纳的内容。")
+            # 需求六：普通提示不弹窗。没东西可收是个"正常结果"，
+            # 弹个要点确定的框纯属添堵。
+            self.panel.show_toast("桌面上没有需要收纳的内容", "warn")
             return
-        result = nest.take_from_desktop(self.cfg.desktop)
-        self._apply_icon_visibility()
-        self.cfg.set("nest_active", result.moved > 0)
-        self.refresh()
-        message = result.summary()
+        self._start_operation("take", pending)
+
+    def restore_desktop(self) -> None:
+        """把收纳目录里的全部内容（含文件夹）还原回桌面。"""
+        if self._op_running():
+            return
+        plan = nest.restore_plan(self.cfg.desktop)
+        if not plan:
+            self.panel.show_toast("收纳目录里没有可还原的内容", "warn")
+            return
+
+        # 需求三：目标已经有同名文件时，先问用户怎么处理。
+        # 「重名自动加 (1)」这条老规则**原样保留**——它仍然是默认行为，
+        # 这里只是让用户在事前有机会改主意。
+        conflicts = [row for row in plan if row["exists"]]
+        skip: "set[str]" = set()
+        if conflicts:
+            choice = self._ask_conflict(conflicts, len(plan))
+            if choice == "cancel":
+                return
+            if choice == "skip":
+                skip = {row["name"] for row in conflicts}
+            elif choice == "replace":
+                replaced = self._replace_conflicts(conflicts)
+                if replaced is None:
+                    return
+                skip = replaced
+        elif not self._confirm_restore(plan):
+            return
+
+        self._start_operation("restore", max(0, len(plan) - len(skip)), skip=skip)
+
+    # ---- 对话框（只在这两处用：批量还原 + 同名冲突）------------------
+    def _confirm_restore(self, plan: "list[dict]") -> bool:
+        folders = sum(1 for row in plan if safety.safe_is_dir(row["entry"]))
+        files = len(plan) - folders
+        answer = QMessageBox.question(
+            self, "还原桌面",
+            f"把收纳的 {len(plan)} 项全部搬回桌面？\n\n"
+            f"目标：{self.cfg.desktop}\n"
+            f"其中：文件 {files} 个"
+            + (f"，文件夹 {folders} 个（连同里面的内容一起搬回）" if folders else "")
+            + "\n\n文件只是移动，不会被删除；重名会自动加序号。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes)
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _ask_conflict(self, conflicts: "list[dict]", total: int) -> str:
+        """「文件已存在 / 替换 / 跳过 / 取消」。
+
+        返回 `replace` / `skip` / `cancel`。
+        """
+        first = conflicts[0]
+        extra = f"（另有 {len(conflicts) - 1} 个同名项）" if len(conflicts) > 1 else ""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("还原桌面")
+        box.setText("文件已存在")
+        box.setInformativeText(
+            f"{Path(first['target']).stem}{extra}\n\n"
+            f"桌面上已经有一个同名文件了。这次要还原 {total} 项，请选择：\n\n"
+            "· 替换：把桌面上的旧文件收进收纳目录（不删除），\n"
+            "  再把收纳里的这一份放回桌面\n"
+            "· 跳过：这一项留在收纳目录里，先不动\n"
+            "· 取消：整批都不还原")
+        replace = box.addButton("替换", QMessageBox.ButtonRole.DestructiveRole)
+        skip = box.addButton("跳过", QMessageBox.ButtonRole.ActionRole)
+        cancel = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(cancel)      # 回车不会误选"替换"
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is replace:
+            return "replace"
+        if clicked is skip:
+            return "skip"
+        return "cancel"
+
+    def _replace_conflicts(self, conflicts: "list[dict]") -> "set[str] | None":
+        """把桌面上的同名旧文件先收进收纳（自动改名、不删除），返回要跳过的名字。
+
+        这样"替换"之后：桌面 = 收纳里那一份（新的），旧的那份安全躺在
+        收纳目录里。全程没有删除，也没动 `_move` / `_unique` 一个字节。
+        """
+        targets = [_PathItem(Path(row["target"])) for row in conflicts]
+        result = nest.take_from_desktop(self.cfg.desktop, items=targets)
         if result.failed:
-            message += "\n\n未能收纳：\n" + "\n".join(
-                f"· {n}：{r}" for n, r in result.failed[:8])
-            QMessageBox.warning(self, "收纳桌面", message)
+            config.log("替换前收纳旧文件失败：" + "、".join(
+                f"{n}（{r}）" for n, r in result.failed))
+            self.panel.show_toast(
+                f"有 {len(result.failed)} 个旧文件没能先收起来，已取消替换", "warn")
+            return None
+        return {Path(final).name for _src, final in result.moves}
+
+    # ---- 后台执行 -----------------------------------------------------
+    def _start_operation(self, kind: str, total: int,
+                         skip: "set[str] | None" = None) -> None:
+        self._last_op_kind = kind
+        self.panel.begin_operation(
+            "正在收纳…" if kind == "take" else "正在还原…", total)
+        worker = OperationWorker(self.cfg.desktop, kind, skip=skip, parent=self)
+        worker.progressed.connect(self._on_op_progress)
+        worker.finished.connect(self._on_op_finished)
+        worker.crashed.connect(self._on_op_crashed)
+        self._op = worker
+        worker.start()
+
+    def _on_op_progress(self, index: int, total: int, name: str) -> None:
+        self.panel.update_progress(index, total, name)
+
+    def _on_op_finished(self, result, kind: str) -> None:
+        self._op = None
+        if kind == "take":
+            self._apply_icon_visibility()
+            self.cfg.set("nest_active", result.moved > 0)
         else:
-            QMessageBox.information(self, "收纳桌面", message)
+            self._show_desktop_icons()
+            self.cfg.set("nest_active", False)
+        self.panel.finish_operation(result, kind)
+        self.refresh()
+        # 面板没开着的时候，Toast 看不见——用托盘气泡补一句，
+        # 否则从托盘菜单点完「收纳桌面」就像什么都没发生。
+        if self.panel.isHidden():
+            self.tray.showMessage(
+                config.APP_NAME_FULL,
+                ("已收纳 %d 个项目" if kind == "take" else "已还原 %d 个项目")
+                % result.moved if not result.failed
+                else f"成功 {result.moved} 项，失败 {len(result.failed)} 项",
+                QSystemTrayIcon.MessageIcon.Information, 4000)
+
+    def _on_op_crashed(self, message: str, kind: str) -> None:
+        self._op = None
+        config.log(f"{kind} 异常：{message}")
+        self.panel.fail_operation(f"操作失败：{message}")
+        self.refresh()
+
+    # ---- 失败明细上的「重试 / 跳过」----------------------------------
+    def _on_retry_item(self, name: str) -> None:
+        """重试某一项（需求四：权限不足 / 文件正在使用 → [重试] [跳过]）。"""
+        if self._op_running():
+            return
+        kind = self._last_op_kind
+        ok, reason = self._retry_one(kind, name)
+        if ok:
+            self.panel.drop_failed_row(name)
+            self.panel.show_toast(f"重试成功：{name}", "ok")
+            self.refresh()
+        else:
+            self.panel.show_toast(f"{name} 仍然失败：{reason or '原因不明'}", "warn")
+
+    def _retry_one(self, kind: str, name: str) -> "tuple[bool, str]":
+        """单项重试。走的还是 `nest` 里那两个现成入口，不另写一套搬运。"""
+        if kind == "restore":
+            for item in nest.list_nest_items():
+                if item.path.name == name:
+                    return nest.restore_item_to_desktop(self.cfg.desktop, item)
+            return False, "这一项已经不在收纳目录里了"
+        for item in nest.list_desktop(self.cfg.desktop)[0]:
+            if item.name == name:
+                result = nest.take_from_desktop(self.cfg.desktop, items=[item])
+                if result.moved:
+                    return True, ""
+                return False, (result.failed[0][1] if result.failed
+                               else "仍然搬不动")
+        return False, "桌面上已经没有这一项了"
+
+    def _on_skip_item(self, name: str) -> None:
+        """这一项先不管：只从明细里划掉，文件留在原处（不会被删）。"""
+        self.panel.drop_failed_row(name)
+        self.panel.show_toast(f"已跳过：{name}", "warn")
 
     # ------------------------------------------------------------------
     # 开机自启 / 退出
@@ -964,6 +1161,11 @@ class TrayApp(QWidget):
         if worker is not None and worker.isRunning():
             worker.wait(4000)
         self._scan = None
+        # 搬运线程还在跑就先等它：它正在动文件，这时候去还原会两边打架
+        operation = getattr(self, "_op", None)
+        if operation is not None and operation.isRunning():
+            operation.wait(15000)
+        self._op = None
         panel_worker = getattr(self.panel, "_worker", None)
         if panel_worker is not None and panel_worker.isRunning():
             panel_worker.wait(6000)

@@ -1120,4 +1120,78 @@ QTreeWidget#HistoryTree QHeaderView::section {{
     border: none;
     border-bottom: 1px solid {c['border']};
 }}
+
+/* ---------- 23. 操作状态条（收纳 / 还原的进度与失败明细）---------- */
+/* 一条横条，三种状态：progress / warn / error。
+   底色调得很淡（和徽标、Toast 同一套 *_soft），因为它就贴在统计卡片下面，
+   铺满高饱和色会把上面的信息全压下去。 */
+#OpBanner {{
+    background: {c['surface_alt']};
+    border: 1px solid {c['border']};
+    border-radius: {R['md']}px;
+}}
+#OpBanner[state="progress"] {{
+    background: {c['primary_soft']};
+    border-color: {c['primary_soft']};
+}}
+#OpBanner[state="warn"] {{
+    background: {c['warn_soft']};
+    border-color: {c['warn_soft']};
+}}
+#OpBanner[state="error"] {{
+    background: {c['danger_soft']};
+    border-color: {c['danger_soft']};
+}}
+#OpTitle {{
+    font-size: {F['sm']}pt;
+    font-weight: {W['semibold']};
+    color: {c['text']};
+}}
+#OpBanner[state="warn"] #OpTitle {{ color: {c['warn']}; }}
+#OpBanner[state="error"] #OpTitle {{ color: {c['danger']}; }}
+/* 计数用等宽感的浅色：它一直在跳（12 / 60），颜色太重要抢戏 */
+#OpCount {{
+    font-size: {F['sm']}pt;
+    color: {c['text_sub']};
+}}
+#OpLink {{
+    background: transparent;
+    border: none;
+    padding: 0px 2px;
+    color: {c['accent']};
+    font-size: {F['xs']}pt;
+}}
+#OpLink:hover {{ color: {c['accent_hover']}; }}
+
+/* 进度条在状态条里再矮一档：它是"还在动"的信号，不是要读的数据 */
+#OpBar {{
+    background: {c['border']};
+    border: none;
+    border-radius: 3px;
+    height: 5px;
+}}
+#OpBar::chunk {{
+    background: {c['accent']};
+    border-radius: 3px;
+}}
+
+/* 失败明细：每行 名称 / 原因 / [重试][跳过] */
+#OpDetail, #OpDetailBody {{ background: transparent; border: none; }}
+#OpRow {{ background: transparent; border-radius: {R['sm']}px; }}
+#OpRow:hover {{ background: {c['hover']}; }}
+#OpName {{ color: {c['text']}; font-size: {F['sm']}pt; }}
+#OpReason {{ color: {c['text_muted']}; font-size: {F['xs']}pt; }}
+#OpAction {{
+    background: transparent;
+    border: 1px solid {c['border_strong']};
+    border-radius: {R['sm']}px;
+    min-height: 0px;
+    padding: 1px 8px;
+    color: {c['text_sub']};
+    font-size: {F['xs']}pt;
+}}
+#OpAction:hover {{
+    background: {c['surface_hover']};
+    color: {c['text']};
+}}
 {glass_block}"""

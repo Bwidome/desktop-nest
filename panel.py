@@ -54,7 +54,8 @@ import config
 import engine
 import nest
 import theme as theme_mod
-from widgets import ElidedLabel, GlassCardMixin, IconLoader, Toast, app_icon
+from widgets import (ElidedLabel, GlassCardMixin, IconLoader, OperationBanner,
+                     Toast, app_icon)
 
 
 class StatCard(QFrame):
@@ -106,6 +107,9 @@ class MainPanel(GlassCardMixin, QWidget):
     request_quit = Signal()
     quick_changed = Signal()
     extensions_changed = Signal()      # 「显示文件后缀名」开关变了，通知别处刷新
+    # Phase 5：状态条上那两条「重试 / 跳过」的出口，由主程序接住
+    retry_item = Signal(str)           # 重试某一项（名称）
+    skip_item = Signal(str)            # 这一项先不管（从明细里划掉）
 
     # 悬浮玻璃卡片：磨砂 + 圆角裁剪 + 深色调色板都在 GlassCardMixin 里
     _glass_card_sel = "#MainCard"
@@ -119,6 +123,8 @@ class MainPanel(GlassCardMixin, QWidget):
         self._history: "list[dict]" = []
         self._row_by_key: "dict[str, QTreeWidgetItem]" = {}
         self._drag_offset = None
+        # 正在批量搬运时置真：按钮要灰掉，免得同一次操作被点两遍
+        self._busy = False
         self._glass_init()
 
         # 悬浮卡片：无边框 + 窗口自身透明，深色半透明只画在里面的 #MainCard 上。
@@ -185,6 +191,14 @@ class MainPanel(GlassCardMixin, QWidget):
         self.notice.setWordWrap(True)
         self.notice.setVisible(False)
         root.addWidget(self.notice)
+
+        # 操作状态条：收纳 / 还原的进度与失败明细（Phase 5）
+        # 放在统计卡片**上面**——正在搬文件的时候，最该被看见的是"进行到哪了"，
+        # 而不是三个静态数字。
+        self.banner = OperationBanner()
+        self.banner.retry_requested.connect(self.retry_item.emit)
+        self.banner.skip_requested.connect(self.skip_item.emit)
+        root.addWidget(self.banner)
 
         cards = QHBoxLayout()
         cards.setSpacing(11)
@@ -522,8 +536,73 @@ class MainPanel(GlassCardMixin, QWidget):
         self.badge_state.style().unpolish(self.badge_state)
         self.badge_state.style().polish(self.badge_state)
 
-        self.btn_take.setEnabled(bool(desktop_pending))
-        self.btn_restore.setEnabled(bool(nest_items))
+        self.btn_take.setEnabled(bool(desktop_pending) and not self._busy)
+        self.btn_restore.setEnabled(bool(nest_items) and not self._busy)
+
+    # ------------------------------------------------------------------
+    # 操作状态（Phase 5）：进度 / 失败明细 / 重试跳过
+    # ------------------------------------------------------------------
+    def begin_operation(self, text: str, total: int) -> None:
+        """开始一次批量搬运：状态条进入"正在做"，两个按钮先灰掉。"""
+        self._busy = True
+        # 旧的提示条先收起来，别和进度条抢同一块地方
+        self.notice.setVisible(False)
+        self.banner.begin(text, total)
+        self.btn_take.setEnabled(False)
+        self.btn_restore.setEnabled(False)
+
+    def update_progress(self, index: int, total: int, name: str = "") -> None:
+        """搬运到第几项了（可以直接当 `nest` 的 progress 回调）。"""
+        if self._busy:
+            self.banner.set_progress(index, total, name)
+
+    def finish_operation(self, result, kind: str = "take") -> None:
+        """一次批量搬运结束：成功只留一颗 Toast，有失败就把明细列在状态条里。
+
+        `kind` 取 `take` / `restore`，只影响文案（"已收纳" / "已还原"）。
+        """
+        self._busy = False
+        word = "已收纳" if kind == "take" else "已还原"
+        failed = list(getattr(result, "failed", []) or [])
+        skipped = list(getattr(result, "skipped", []) or [])
+        moved = int(getattr(result, "moved", 0) or 0)
+
+        if failed:
+            # 需求二：不要让整个操作无提示地结束 —— 明细留在状态条里，
+            # 每一条都带 [重试] [跳过]，不用弹窗打断。
+            title = "部分项目处理失败" if moved else "处理失败"
+            self.banner.show_failure(title, moved, failed, skipped)
+            self.show_toast(f"成功 {moved} 项，失败 {len(failed)} 项", "warn")
+            return
+
+        self.banner.hide_banner()
+        if moved:
+            # 需求一：完成态是「✓ 已收纳 / 60 个项目」两行，短、清楚
+            self.show_toast(f"{word}\n{moved} 个项目", "ok")
+        elif skipped:
+            self.show_toast(f"没有需要{word[1:]}的项目", "warn")
+        else:
+            self.show_toast("没有需要处理的条目", "warn")
+
+    def fail_operation(self, message: str) -> None:
+        """整个操作没法开始（配置不对、目录不可写……）：用状态条说清楚。"""
+        self._busy = False
+        self.banner.show_failure(message, 0, [])
+        self.show_toast(message, "danger")
+
+    def show_conflict(self, name: str, count: int = 1) -> None:
+        """还原时发现桌面已有同名文件——把这件事记在状态条上（不作为弹窗）。"""
+        extra = f"（另有 {count - 1} 个同名项）" if count > 1 else ""
+        self.notice.setText(f"提示：桌面已有同名文件「{name}」{extra}，已按原规则自动改名")
+        self.notice.setVisible(True)
+
+    def drop_failed_row(self, name: str) -> None:
+        """把某一项从失败明细里划掉（用户点了「跳过」）。"""
+        self.banner.drop_row(name)
+
+    def clear_banner(self) -> None:
+        self._busy = False
+        self.banner.hide_banner()
 
     def refresh_items(self) -> None:
         self.items_tree.clear()
