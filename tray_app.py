@@ -36,6 +36,40 @@ from settings import SettingsDialog
 from widgets import app_icon
 
 
+# --------------------------------------------------------------------------
+# 前台窗口"压住菜单栏"的判定
+# --------------------------------------------------------------------------
+# 横向至少压住这么多像素、纵向至少压住这么多像素，才算"真的重叠"。
+# 只擦到一条边、只在角上碰一下都不算 —— 否则拖窗口经过菜单栏、
+# 或者把窗口贴着菜单栏顶边摆好，菜单栏都会神经质地闪一下。
+DOCK_HIT_MIN_X = 24
+DOCK_HIT_MIN_Y = 6
+
+# 菜单栏该不该露面的检查节奏。原来 1200ms，但那意味着"打开一个压住菜单栏的
+# 窗口"最长要等 2.4 秒（两次确认）菜单栏才让开，观感上像"没反应"。
+# 400ms × 2 次确认 = 0.8 秒，既跟得上，又足够滤掉窗口打开动画的中间帧。
+AUTO_SHOW_INTERVAL = 400
+
+
+def rects_overlap(a, b, min_x: int = 1, min_y: int = 1) -> bool:
+    """两个屏幕矩形有没有真的相交。
+
+    矩形用 `(left, top, right, bottom)` 四元组表示（Win32 的物理像素口径）。
+    **两个方向**的重叠量都要超过阈值才算数：只压住一条边、只在角上碰一下
+    都不算"压住菜单栏"。
+
+    抽成纯函数是为了能直接喂假矩形做自检，不用真的开一个窗口去挡。
+    """
+    try:
+        left = max(int(a[0]), int(b[0]))
+        top = max(int(a[1]), int(b[1]))
+        right = min(int(a[2]), int(b[2]))
+        bottom = min(int(a[3]), int(b[3]))
+        return (right - left) > min_x and (bottom - top) > min_y
+    except (TypeError, IndexError, ValueError):
+        return False
+
+
 class MONITORINFO(ctypes.Structure):
     """`GetMonitorInfoW` 需要的结构体。
 
@@ -287,7 +321,7 @@ class TrayApp(QWidget):
                 self.menu.addAction(action)
             self.menu.addSeparator()
             manage = self.menu.addAction("管理常用启动…")
-            manage.triggered.connect(lambda: self.open_browse())
+            manage.triggered.connect(self.open_manage_apps)
             self.menu.addSeparator()
         else:
             hint = self.menu.addAction("（右键仓库里的项目可加入常用启动）")
@@ -423,6 +457,23 @@ class TrayApp(QWidget):
     def show_desktop_files(self) -> None:
         """打开收纳面板（上拉菜单）。再点一次会收起，见 toggle_desktop_files。"""
         self.desktop_browser.show_window()
+
+    def open_manage_apps(self) -> None:
+        """托盘「管理常用启动…」：打开收纳面板，并直接进管理模式。
+
+        ⚠️ **这里原来写的是 `self.open_browse()`，那个方法根本不存在。**
+        而且 PyQt6 里槽函数抛出的异常不会打 traceback，是**直接 abort 进程**，
+        所以表现成"点一下就闪退"，日志里连一行都没有。
+
+        顺序是"先设管理模式、再 show_window"，不能反过来：
+        `show_window()` 会 `refresh_from_disk()` 把整页卡片重建一遍，
+        先 show 的话角标是长在**上一批**卡片上的，重建之后全没了。
+        反过来先置位，`_render_page()` 在造新卡片时就会按 `_manage_mode`
+        把角标挂好（见 `_attach_tile_badge`），一次到位、不闪。
+        """
+        browser = self.desktop_browser
+        browser.set_manage_mode(True)
+        browser.show_window()
 
     def _dock_reserve(self) -> int:
         """收纳面板贴底时要给底部菜单栏让开的高度（含一点间隙）。"""
@@ -706,22 +757,80 @@ class TrayApp(QWidget):
         except Exception:
             return False
 
+    def _foreground_hits_dock(self) -> bool:
+        """前台窗口的矩形有没有**真的压在菜单栏上**。
+
+        需求：打开新窗口时，不与菜单栏重叠就正常显示，重叠就自动隐藏。
+
+        它和 `_foreground_is_fullscreen()` 是两条互补的判据：
+        * 那条看"窗口够不够大"（全屏 / 最大化）——挡住的往往是整块屏幕；
+        * 这条直接量**两块矩形相不相交**——管的是"窗口不大、但刚好压在菜单栏上"。
+
+        两边都用 Win32 的 `GetWindowRect` 拿**物理像素**，不掺 Qt 的坐标：
+        高 DPI 下 `dock.geometry()` 是逻辑像素（DIP），直接和 Win32 矩形比
+        会差一个缩放倍数，重叠判定就全错了。
+
+        排除项与全屏判定保持一致：本程序自己的窗口（收纳面板本来就贴着菜单栏，
+        算进去会导致"一打开面板菜单栏就消失"）、桌面本身、最小化窗口。
+        """
+        try:
+            dock = getattr(self, "dock", None)
+            if dock is None or not dock.isVisible():
+                return False
+            # 离屏平台没有真正的窗口管理器，窗口矩形没有意义（自检跑在这里）
+            if QApplication.platformName() == "offscreen":
+                return False
+
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                return False
+            if self._foreground_is_self():         # 自己的窗口不算
+                return False
+            if self._desktop_is_foreground():      # 桌面自己不算
+                return False
+            if user32.IsIconic(hwnd):              # 最小化不算
+                return False
+            if not user32.IsWindowVisible(hwnd):
+                return False
+
+            dock_rect = wintypes.RECT()
+            if not user32.GetWindowRect(int(dock.winId()), ctypes.byref(dock_rect)):
+                return False
+            win_rect = wintypes.RECT()
+            if not user32.GetWindowRect(hwnd, ctypes.byref(win_rect)):
+                return False
+
+            return rects_overlap(
+                (win_rect.left, win_rect.top, win_rect.right, win_rect.bottom),
+                (dock_rect.left, dock_rect.top, dock_rect.right, dock_rect.bottom),
+                DOCK_HIT_MIN_X, DOCK_HIT_MIN_Y)
+        except Exception:
+            return False
+
+    def _should_avoid_dock(self) -> bool:
+        """该不该把菜单栏收起来：全屏/最大化 **或者** 真的压在菜单栏上。"""
+        if self._foreground_is_fullscreen():
+            return True
+        return self._foreground_hits_dock()
+
     def _auto_show_tick(self) -> None:
         """定时检查菜单栏该不该露面。
 
         两条规则：
         * 人回到桌面 → 自动显示（除非用户主动点过隐藏）；
-        * 有人在全屏看视频 / 演示 → 自动让开，不遮挡内容；
-          全屏结束后再自己回来。
+        * 有人全屏看视频 / 演示，或者**新开的窗口压在菜单栏上** → 自动让开；
+          不再遮挡之后再自己回来。
 
         ⚠️ 这里**只动窗口的可见性**（`show_bar` / `hide_bar`），
         绝不改 `dock_visible` / `dock_hidden_by_user` 这些状态变量——
         否则"打开收纳面板"会被误当成"用户把菜单栏关了"，之后再也不自动弹回来。
 
-        **防闪烁**：只有当"要让开"这个状态**连续两次 tick（约 2.4 秒）都成立**
+        **防闪烁**：只有当"要让开"这个状态**连续两次 tick（约 0.8 秒）都成立**
         才真的隐藏；恢复则要求"不需要让开"连续两次成立。这样：
         * 切换程序、窗口动画、拖动窗口这些瞬时状态不会引起显隐抖动；
-        * 用户真的最大化/全屏时，最多 2.4 秒后让开，感知上依然是"立刻"。
+        * 用户真的最大化 / 开了个压住菜单栏的窗口时，0.8 秒后让开，
+          感知上依然是"立刻"。
         """
         try:
             if bool(self.cfg.get("dock_hidden_by_user", False)):
@@ -734,8 +843,12 @@ class TrayApp(QWidget):
                 self._normal_streak = 0
                 return
 
-            if self._dock_in_use():
-                # 收纳面板开着（翻页 / 搜索）时菜单栏必须稳住：不让开，也不隐藏。
+            # 收纳面板开着（翻页 / 搜索）时菜单栏必须稳住：不让开，也不隐藏。
+            #
+            # 但有个例外：如果这时**别的**窗口压了上来（用户开了浏览器又切过去），
+            # 那就按正常规则让开。"面板还开着"不等于"菜单栏该一直挡着别人"——
+            # 面板只是浮层，前台已经是别人的窗口了。
+            if self._dock_in_use() and not self._foreground_hits_dock():
                 self._dock_hidden_for_fullscreen = False
                 self._fs_streak = 0
                 self._normal_streak = 0
@@ -744,7 +857,7 @@ class TrayApp(QWidget):
                     self.rebuild_tray_menu()
                 return
 
-            fullscreen = self._foreground_is_fullscreen()
+            fullscreen = self._should_avoid_dock()
             if fullscreen:
                 self._normal_streak = 0
                 self._fs_streak += 1
@@ -772,7 +885,7 @@ class TrayApp(QWidget):
         except Exception as exc:
             config.log(f"菜单栏自动显隐失败：{type(exc).__name__}: {exc}")
         finally:
-            QTimer.singleShot(1200, self._auto_show_tick)
+            QTimer.singleShot(AUTO_SHOW_INTERVAL, self._auto_show_tick)
 
     # ------------------------------------------------------------------
     # 窗口
