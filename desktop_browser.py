@@ -55,6 +55,7 @@ import engine
 import nest
 import recycle
 import theme as theme_mod
+from anim import HoverVeil, ease_curve, fade_in
 from textutil import fuzzy_match
 from widgets import (DND_MIME, ElidedLabel, FALLBACK_TILE_COLOR,
                      GlassCardMixin, IconLoader, PLACEHOLDER_COLORS, Toast,
@@ -195,6 +196,11 @@ class ItemTile(QFrame):
                                      Qt.AlignmentFlag.AlignTop)
         layout.addWidget(self.name_label)
         layout.addStretch(1)
+        # 悬停底色：QSS 没有 transition，用一层自绘的覆盖控件在 160ms 里淡进来
+        # （见 `anim.HoverVeil` 的文件头）。它 `lower()` 到图标 / 名字**下面**，
+        # 所以文字不会被染灰，也不需要每帧重排样式表。
+        self.veil = HoverVeil(self, palette["hover"],
+                              radius=theme_mod.RADIUS["lg"])
         self._apply_style()
 
     def set_icon(self, icon) -> None:
@@ -213,6 +219,17 @@ class ItemTile(QFrame):
         if self.selected != value:
             self.selected = value
             self._apply_style()
+            # 选中态自己有一层底（`accent_soft`），悬停层要让开，别叠两层灰
+            self.veil.snap(0.0 if value else (1.0 if self.underMouse() else 0.0))
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        if not self.selected:
+            self.veil.enter()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self.veil.leave()
+        super().leaveEvent(event)
 
     def _apply_style(self) -> None:
         """把"选中"这件事同步给样式表。
@@ -404,8 +421,11 @@ class AppButton(QToolButton):
         self.setToolTip(f"{display}\n{path}\n\n单击打开 · 右键更多操作")
         self.setText(self._elide(display))
         # 悬停放大用的动画；起点在每次触发时现取，来回移动不会跳。
+        # 时长取 `DURATION["hover"]`（160ms，需求二给的是 150~200），
+        # 缓动走项目唯一那条曲线（`anim.ease_curve()`）。
         self._icon_anim = QPropertyAnimation(self, b"iconSize", self)
-        self._icon_anim.setDuration(theme_mod.DURATION["fast"])
+        self._icon_anim.setDuration(theme_mod.DURATION["hover"])
+        self._icon_anim.setEasingCurve(ease_curve())
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(
             lambda pos: self.context_requested.emit(self, self.mapToGlobal(pos)))
@@ -1198,6 +1218,10 @@ class DesktopBrowser(GlassCardMixin, QWidget):
             self._page = index
             self._render_page()
             self.scroll.verticalScrollBar().setValue(0)
+            # 翻页 = 需求四说的"标签切换"：只淡入，**不动位置**。
+            # 220ms 落在 200~250 的区间里；这里是 `_render_page()` 之后唯一的
+            # 一处淡入——搜索 / 筛选每敲一个字都重建，那种情况不该有动画。
+            fade_in(self.grid_host)
 
     def _rebuild(self) -> None:
         self._matches = self._filtered()

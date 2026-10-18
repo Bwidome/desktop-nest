@@ -228,16 +228,25 @@ FONT_WEIGHT = {
 }
 
 # 动画时长（毫秒）。Qt 的 QSS 没有 transition，这些值给代码里的
-# QTimer / 弹簧动画用；弹簧本身的手感在 springs.py 里。
+# QTimer / 弹簧动画 / anim.py 用；弹簧本身的手感在 springs.py 里。
+#
+# 取值依据（Phase 6）：悬停 150~200、翻页 200~250、提示进出 180~200、
+# 对话框 180。**只做交互反馈，不做装饰**——没有无限循环、没有大幅位移。
 DURATION = {
-    "fast": 120,        # 悬停 / 聚焦反馈
+    "fast": 120,        # 输入防抖 / 小反馈（悬停不用这个，见 hover）
+    "hover": 160,       # 悬停底色过渡（`anim.HoverVeil`）
     "normal": 180,      # 面板显隐
+    "page": 220,        # 翻页 / 标签切换淡入（只淡入，不动位置）
+    "toast_in": 200,    # 提示进场：fade + 8px 上抬
+    "toast_out": 180,   # 提示退场：只 fade
+    "dialog": 180,      # 对话框进场：fade + 0.96 → 1.0
     "slow": 260,        # 较大的位移
     "settle": 60,       # Dock 尺寸重算的防抖
     "tick": 16,         # 弹簧动画帧间隔（≈60fps）
     "highlight": 1200,  # 选中高亮停留
 }
-# 标准缓动曲线（Qt 端由 springs.py 的弹簧实现，这里只作记录 / 给未来用）
+# 标准缓动曲线：只有这一条。`anim.ease_curve()` 会把同一组控制点
+# 喂给 Qt 的 `QEasingCurve.BezierSpline`，所以代码里和设计上是同一条线。
 EASING = "cubic-bezier(0.22, 0.80, 0.20, 1.00)"
 
 FONT_FAMILY = '"Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif'
@@ -1038,9 +1047,12 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
     border: 1px solid transparent;
     border-radius: {R['lg']}px;
 }}
-/* 悬停只换一层很淡的底，**不动边框、不动尺寸** —— 整片网格不会跟着跳 */
+/* 悬停底色的过渡交给 `anim.HoverVeil`（Phase 6）：QSS 没有 transition，
+   而每帧改样式表会让 Qt 重新匹配选择器 + 重排样式，是纯粹的浪费。
+   所以这里只留 transparent —— 底色由那层自绘控件在 160ms 内淡进来，
+   观感和"一条 160ms 的 background 过渡"完全一致，但只重绘那一层。 */
 #FileTile:hover {{
-    background: {c['hover']};
+    background: transparent;
 }}
 #FileTile[selected="true"] {{
     background: {c['accent_soft']};
@@ -1178,7 +1190,8 @@ QTreeWidget#HistoryTree QHeaderView::section {{
 /* 失败明细：每行 名称 / 原因 / [重试][跳过] */
 #OpDetail, #OpDetailBody {{ background: transparent; border: none; }}
 #OpRow {{ background: transparent; border-radius: {R['sm']}px; }}
-#OpRow:hover {{ background: {c['hover']}; }}
+/* 同 `#FileTile`：悬停底色由 `anim.HoverVeil` 在 160ms 内淡进来 */
+#OpRow:hover {{ background: transparent; }}
 #OpName {{ color: {c['text']}; font-size: {F['sm']}pt; }}
 #OpReason {{ color: {c['text_muted']}; font-size: {F['xs']}pt; }}
 #OpAction {{

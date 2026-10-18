@@ -32,9 +32,9 @@ _IMPORT_ERROR = ""
 # 少一个名字会让某个模块 import 直接失败，所以增删请同步检查调用方。
 try:
     from PyQt6.QtCore import (  # noqa: F401
-        QEvent, QEventLoop, QLibraryInfo, QMimeData, QPoint, QPointF,
-        QPropertyAnimation, QRect, QSize, Qt, QThread, QTimer,
-        pyqtSignal as Signal,
+        QEvent, QEventLoop, QEasingCurve, QLibraryInfo, QMimeData, QPoint,
+        QPointF, QPropertyAnimation, QRect, QSize, Qt, QThread, QTimer,
+        QVariantAnimation, pyqtSignal as Signal,
     )
     from PyQt6.QtGui import (  # noqa: F401
         QAction, QBrush, QColor, QCursor, QDrag, QDragEnterEvent,
@@ -58,8 +58,9 @@ except ImportError as exc:  # pragma: no cover
         # 与上面的 PyQt6 清单保持一一对应（此前 PySide6 分支漏了
         # QGridLayout / QInputDialog，一旦回退就会 NameError）。
         from PySide6.QtCore import (  # type: ignore  # noqa: F401
-            QEvent, QEventLoop, QLibraryInfo, QMimeData, QPoint, QPointF,
-            QPropertyAnimation, QRect, QSize, Qt, QThread, QTimer, Signal,
+            QEvent, QEventLoop, QEasingCurve, QLibraryInfo, QMimeData, QPoint,
+            QPointF, QPropertyAnimation, QRect, QSize, Qt, QThread, QTimer,
+            QVariantAnimation, Signal,
         )
         from PySide6.QtGui import (  # type: ignore  # noqa: F401
             QAction, QBrush, QColor, QCursor, QDrag, QDragEnterEvent,

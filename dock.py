@@ -485,7 +485,9 @@ class DockToast(Toast):
         x = max(screen.left() + 4,
                 min(x, max(screen.left() + 4,
                            screen.right() - self.width() - 4)))
-        self.move(x, y)
+        # 走 `_settle_position` 而不是直接 `move`：基类进场时会从下方抬 8px，
+        # 这里不认 base 的话，那 8px 会把它摆回原位，动画等于没做。
+        self._settle_position(x, y)
 
 
 class DockBar(QWidget):

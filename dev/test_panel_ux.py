@@ -339,16 +339,25 @@ def main() -> int:
     tile.set_selected(False)
     pump(app, 0.1)
 
-    tile.setAttribute(Qt.WidgetAttribute.WA_UnderMouse, True)
-    tile.style().unpolish(tile)
-    tile.style().polish(tile)
-    pump(app, 0.1)
+    # Phase 6：悬停底色改由 `anim.HoverVeil` 在 160ms 里淡进来（QSS 没有
+    # transition），所以这里走**真实的 enterEvent**，并且要把动画跑完再抓图。
+    # 老做法（`WA_UnderMouse` + 重新 polish）只对纯 QSS 的 `:hover` 有效。
+    QApplication.sendEvent(tile, QEvent(QEvent.Type.Enter))
+    pump(app, 0.28)
     hovered = tile.grab()
     check("实测：悬停态真的画出了底色（渲染有差异）",
           diff_pixels(plain, hovered) > 0, str(diff_pixels(plain, hovered)))
-    tile.setAttribute(Qt.WidgetAttribute.WA_UnderMouse, False)
-    tile.style().unpolish(tile)
-    tile.style().polish(tile)
+    check("悬停是过渡而不是瞬变（时长取 DURATION['hover']）",
+          tile.veil._anim.duration() == theme_mod.DURATION["hover"],
+          str(tile.veil._anim.duration()))
+    check("悬停淡到了目标底色（和 QSS 时期一样浓）", tile.veil.value > 0.9,
+          f"{tile.veil.value:.2f}")
+    QApplication.sendEvent(tile, QEvent(QEvent.Type.Leave))
+    pump(app, 0.28)
+    check("离开后淡回透明", tile.veil.value < 0.05, f"{tile.veil.value:.2f}")
+    check("离开后和悬停前完全一样（没有残留）",
+          diff_pixels(plain, tile.grab()) == 0,
+          str(diff_pixels(plain, tile.grab())))
 
     check("点击区域扩大了（比原来 CELL-8 更大）",
           db_mod.TILE_W > db_mod.CELL_W - 8

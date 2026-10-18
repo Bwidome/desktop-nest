@@ -15,13 +15,14 @@ from pathlib import Path
 from qt_compat import (
     QCheckBox, QColor, QDialog, QEvent, QFont, QFontMetrics, QFrame,
     QGraphicsOpacityEffect, QHBoxLayout, QIcon, QImage, QLabel, QPainter,
-    QPainterPath, QPalette, QPen, QPixmap, QPointF, QProgressBar,
+    QPainterPath, QPalette, QPen, QPixmap, QPoint, QPointF, QProgressBar,
     QPropertyAnimation, QPushButton, QRect, QScrollArea, QSize, QSizePolicy,
-    QToolButton, Qt, QTimer, QVBoxLayout, QWidget,
+    QToolButton, Qt, QTimer, QVariantAnimation, QVBoxLayout, QWidget,
     Signal,
 )
 
 import acrylic
+import anim as anim_mod
 import config
 import engine
 import icons
@@ -354,10 +355,14 @@ class Toast(QLabel):
         self.toast.show_message("✓ 已撤销\\n3 个项目已恢复到原来的位置")
     """
 
-    # 停留时长 / 淡入淡出时长（毫秒）
+    # 停留时长（毫秒）
     DURATION = 2600
-    FADE_IN = 130
-    FADE_OUT = 220
+    #: 进场 / 退场时长取自 token（需求五：进入 fade + 轻微 translateY，退出只 fade）
+    FADE_IN = anim_mod.ms("toast_in", 200)
+    FADE_OUT = anim_mod.ms("toast_out", 180)
+    #: 进场时从下方抬起多少像素。Qt 控件没有 `transform`，位移只能靠 `move()`；
+    #: 所以位移只用在"出现一次"的提示上，绝不用于会持续交互的控件。
+    ENTER_RISE = 8
     # 离卡片底边的距离：正好在底部按钮那一排的上方
     BOTTOM_GAP = 76
 
@@ -388,6 +393,15 @@ class Toast(QLabel):
         self._anim = QPropertyAnimation(self._effect, b"opacity", self)
         self._anim.finished.connect(self._on_anim_finished)
         self._fading_out = False
+        # 进场时的位移：`_base_pos` 是"摆好之后该在的位置"，`_rise` 是当前
+        # 还差多少像素没抬上去。`place()` 每次都先算 base、再叠加 `_rise`，
+        # 所以动画期间父控件改尺寸也不会把它甩到别处去。
+        self._base_pos = QPoint(0, 0)
+        self._rise = 0.0
+        self._slide = QVariantAnimation(self)
+        self._slide.setDuration(self.FADE_IN)
+        self._slide.setEasingCurve(anim_mod.ease_curve())
+        self._slide.valueChanged.connect(self._on_slide)
         self.hide()
         # 跟着父控件改尺寸：装个事件过滤器，而不是让每个窗口都去覆盖
         # resizeEvent——重裁圆角那条路是 GlassCardMixin 的，别被别的事占用
@@ -429,8 +443,13 @@ class Toast(QLabel):
         self.adjustSize()
         self.place()
         self._fading_out = False
+        # 从 0 开始淡入。不先归零的话，`_fade_to()` 的起点就是"当前不透明度"，
+        # 第一次显示时它还是构造时设的 1.0 —— 于是**第一颗 Toast 是硬出现的**，
+        # 只有第二颗起才有淡入（以前就是这样，看着像"有时有动画有时没有"）。
+        self._effect.setOpacity(0.0)
         self.show()
         self.raise_()
+        self._start_rise(animate)
         self._fade_to(1.0, self.FADE_IN, animate)
         self._timer.start(self._stay)
 
@@ -466,6 +485,8 @@ class Toast(QLabel):
     def hide_now(self) -> None:
         self._timer.stop()
         self._anim.stop()
+        self._slide.stop()
+        self._rise = 0.0
         self._effect.setOpacity(0.0)
         self.hide()
 
@@ -483,7 +504,33 @@ class Toast(QLabel):
             self.setMaximumWidth(16777215)
         x = (parent.width() - self.width()) // 2
         y = parent.height() - self.height() - self.BOTTOM_GAP
-        self.move(max(6, x), max(6, y))
+        self._settle_position(max(6, x), max(6, y))
+
+    def _settle_position(self, x: int, y: int) -> None:
+        """记下"摆好之后该在的位置"，再按当前的抬起量算出实际位置。
+
+        进场动画只改 `_rise`，位置永远由 base 现算——这样动画进行中父控件
+        改尺寸（`place()` 被重入）也不会把它甩到别处。
+        """
+        self._base_pos = QPoint(int(x), int(y))
+        self.move(self._base_pos.x(),
+                  self._base_pos.y() + int(round(self._rise)))
+
+    def _start_rise(self, animate: bool) -> None:
+        """进场时从下方 8px 抬到位（需求五：fade + slight translateY）。"""
+        self._slide.stop()
+        self._rise = float(self.ENTER_RISE) if animate else 0.0
+        self.place()
+        if not animate or self.ENTER_RISE <= 0:
+            return
+        self._slide.setStartValue(float(self.ENTER_RISE))
+        self._slide.setEndValue(0.0)
+        self._slide.start()
+
+    def _on_slide(self, value) -> None:
+        self._rise = float(value)
+        self.move(self._base_pos.x(),
+                  self._base_pos.y() + int(round(self._rise)))
 
     # ------------------------------------------------------------------
     def _fade_to(self, value: float, duration: int, animate: bool) -> None:
@@ -562,6 +609,18 @@ class OpRow(QWidget):
         # "折行后的高度"估，实测一条只有 22px 的行能报到 256px，状态条照着算
         # 就会在明细下面空出一大片。
         self.setFixedHeight(max(26, QFontMetrics(skip.font()).height() + 12))
+        # 悬停底色过渡（Phase 6）：和网格卡片同一套 `anim.HoverVeil`。
+        # 颜色取玻璃那套 token（这张卡片是磨砂的），不在这里写死色号。
+        self.veil = anim_mod.HoverVeil(
+            self, theme.glass_palette()["hover"], radius=theme.RADIUS["sm"])
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self.veil.enter()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self.veil.leave()
+        super().leaveEvent(event)
 
 
 class OperationBanner(QFrame):

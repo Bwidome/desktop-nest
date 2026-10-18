@@ -20,6 +20,7 @@ from qt_compat import (
     QMessageBox, QPushButton, QVBoxLayout, Qt,
 )
 
+import anim as anim_mod
 import config
 import engine
 import icons
@@ -40,6 +41,19 @@ class SettingsDialog(QDialog):
         self.setStyleSheet(theme_mod.stylesheet(self.dark))
         self._build_ui()
         self._load()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        """进场：淡入 + 0.96 → 1.0 的轻微放大（需求六）。
+
+        只对**我们自己的**对话框做。系统的 `QMessageBox` 是平台自己画的窗口，
+        动它会闪；而且它本来就居中弹出，不存在"从屏幕底部飞进来"的问题。
+        同一个对话框第二次显示时不再播（`_intro_done`）——重复播就成了装饰。
+        """
+        super().showEvent(event)
+        if getattr(self, "_intro_done", False):
+            return
+        self._intro_done = True
+        anim_mod.fade_scale_window(self)
 
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
