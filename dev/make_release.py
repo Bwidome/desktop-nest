@@ -54,6 +54,7 @@ DIST_ROOT = BUILD_ROOT / "dist"
 WORK_ROOT = BUILD_ROOT / "work"
 COLLECT_DIR = DIST_ROOT / "桌面收纳"
 README_SRC = ROOT / "release" / "使用说明.txt"
+LICENSE_SRC = ROOT / "LICENSE"
 
 EXE_FROM = "桌面收纳.exe"
 EXE_TO = "DesktopNest.exe"
@@ -144,7 +145,7 @@ def build(python: str) -> None:
 # 2. 改名 + 补说明
 # --------------------------------------------------------------------------
 def stage() -> None:
-    step("2/3  整理产物（改名 + 补使用说明）")
+    step("2/3  整理产物（改名 + 补使用说明 + 补许可证）")
     if not COLLECT_DIR.is_dir():
         raise SystemExit(f"没找到打包产物目录：{COLLECT_DIR}")
 
@@ -162,6 +163,16 @@ def stage() -> None:
         raise SystemExit(f"缺少发行说明模板：{README_SRC}")
     shutil.copy2(README_SRC, COLLECT_DIR / README_SRC.name)
     say(f"  · 已放入 {README_SRC.name}")
+
+    # 许可证必须随二进制一起发：本项目是 GPL-3.0，而发行包里打包了 PyQt6
+    # （GPL v3 / 商业双授权）的二进制。GPL v3 要求把许可证文本一并交给
+    # 接收者，所以跟说明文件一样拷到产物根目录（不是塞进 _internal）。
+    if LICENSE_SRC.is_file():
+        shutil.copy2(LICENSE_SRC, COLLECT_DIR / "LICENSE")
+        say("  · 已放入 LICENSE")
+    else:
+        # 不中断构建：老分支上暂时没有 LICENSE 时仍然能出包，但要留显眼提示
+        say("  ⚠️ 没找到 LICENSE —— 发行包将缺少许可证文本，不符合 GPL 分发要求")
 
     internal = COLLECT_DIR / "_internal"
     if not internal.is_dir():
