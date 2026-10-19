@@ -269,19 +269,22 @@ def main() -> int:
     app.processEvents()
     check("先把菜单栏藏起来", not dock.isVisible())
 
-    # 把"前台是桌面"这件事伪造出来，验证自动显示逻辑
+    # 回到桌面 → 没有窗口遮挡 → 一次 tick 就该显示回来
+    # （响应速度是需求明确要求的：不能让菜单栏明显延迟响应）
     original = tray._desktop_is_foreground
+    original_fs = tray._foreground_is_fullscreen
     tray._desktop_is_foreground = lambda: True
+    tray._foreground_is_fullscreen = lambda: False
     try:
-        # 现在有防抖：单次 tick 只累计一次，连续两次才动作（避免切换程序时闪烁）
+        tray.dodge.probe_enabled = True
+        tray.dodge._last_switch = 0.0
         tray._auto_show_tick()
         app.processEvents()
-        check("第一次 tick 只累计、不立刻动作（防抖）", not dock.isVisible())
-        tray._auto_show_tick()
-        app.processEvents()
-        check("连续两次确认后 → 菜单栏自动显示", dock.isVisible())
+        check("回到桌面后 → 菜单栏自动显示（一次 tick 就够）", dock.isVisible())
     finally:
         tray._desktop_is_foreground = original
+        tray._foreground_is_fullscreen = original_fs
+        tray.dodge.probe_enabled = False
 
     # 用户主动隐藏时不该自动弹（多跑几次确认不会累积后弹出来）
     dock.hide_self()

@@ -558,6 +558,10 @@ class DockBar(QWidget):
         self._settle_timer.setInterval(theme_mod.DURATION["settle"])
         self._settle_timer.timeout.connect(self._settle)
 
+        # 窗口避让的滑出/滑入动画期间把它置 True：那段时间菜单栏的位置由
+        # 动画负责，`reposition()` / `_settle()` 一律不许插手（见 begin_slide）。
+        self._slide_locked = False
+
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint |
                             Qt.WindowType.Tool |
                             Qt.WindowType.WindowStaysOnTopHint |
@@ -1173,7 +1177,13 @@ class DockBar(QWidget):
         需求：「菜单栏应该可以自由移动而不是只能在底下移动」。
         所以横向、纵向都听 `dock_x` / `dock_y` 的；**从来没拖过**时才贴底居中
         （保持开箱即用的默认观感）。
+
+        ⚠️ 窗口避让的滑出/滑入动画期间直接返回：那段时间窗口位置由
+        `dock_dodge` 逐帧驱动，这里再搬一次会把动画凭空打断（表现是"闪一下
+        就跳到原位"）。动画结束后调 `end_slide()` 交还控制权。
         """
+        if getattr(self, "_slide_locked", False):
+            return
         screen = self.screen().availableGeometry()
         width, height = self.width(), self.height()
         # 兜底：万一比屏幕还大，先压缩到屏幕内，别让内容跑到屏幕外
@@ -1227,6 +1237,30 @@ class DockBar(QWidget):
         if toast is not None:
             toast.hide_now()
         self.hide()
+
+    # ------------------------------------------------------------------
+    # 窗口避让动画的"位置锁"
+    # ------------------------------------------------------------------
+    # 为什么要单开一对方法，而不是让 dock_dodge 直接去动 `_settle_timer`：
+    # `reposition()` 会被 `refit()` / `showEvent()` / `_settle()` 三个地方调到，
+    # 而 `_settle()` 是**异步**的（显示后约 60ms 才跑）。滑入动画正好落在这个
+    # 窗口里，被它搬一次就白滑了。所以把"动画期间别动位置"这件事收在 DockBar
+    # 自己身上，外面只管 begin / end。
+    def begin_slide(self) -> None:
+        """进入滑出/滑入动画：锁住位置，停掉异步的校正定时器。"""
+        self._slide_locked = True
+        try:
+            self._settle_timer.stop()
+        except Exception:
+            pass
+
+    def end_slide(self) -> None:
+        """动画结束：解锁位置，把校正流程交还给 `_settle`。"""
+        self._slide_locked = False
+        try:
+            self._settle_timer.start()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # 拖动整条菜单栏 / 长按排序常用软件

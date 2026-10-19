@@ -193,6 +193,9 @@ DEFAULTS: "dict[str, Any]" = {
     "dock_auto_show": True,          # 回到桌面时自动把菜单栏显示出来
     "dock_hidden_by_user": False,    # 用户主动点过隐藏（此时不自动弹）
     "dock_avoid_fullscreen": True,   # 全屏看视频/演示时自动让开，不遮挡
+    # 别的窗口（哪怕不是全屏）压在菜单栏那块区域上时，也让开。
+    # 关掉它就回到"只有全屏才让开"的老行为。
+    "dock_avoid_overlap": True,
     "dock_x": None,
     "dock_icon_size": 44,
     "dock_always_on_top": True,

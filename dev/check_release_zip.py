@@ -69,6 +69,12 @@ def main() -> int:
     env["USERPROFILE"] = str(home)
     env["LOCALAPPDATA"] = str(local)
     env["APPDATA"] = str(roaming)
+    # ⚠️ USERNAME 也必须换掉：单实例互斥体的名字是
+    # `Global\DesktopNest.SingleInstance.v1.<用户名>`，而 `_user_slug()` 读的是
+    # `os.environ["USERNAME"]`。不换的话，只要本机**正开着**一个桌面收纳，
+    # 沙盒里的自检就会在第 5 步被判成"已经有实例在运行"，验证直接失败——
+    # 那是隔离没做全，不是发行包有问题。
+    env["USERNAME"] = "NestSandbox"
     env["QT_QPA_PLATFORM"] = "offscreen"     # 无头环境下别真开窗
     env.pop("PYTHONPATH", None)
     env.pop("PYTHONHOME", None)

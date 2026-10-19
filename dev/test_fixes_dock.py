@@ -129,6 +129,7 @@ def main() -> int:
     # 这次的崩溃就是"槽指向不存在的方法"。PyQt6 不会报错，直接 abort，
     # 所以只能靠静态扫描把它挡在提交前。
     source = (HERE / "tray_app.py").read_text(encoding="utf-8")
+    dodge_source = (HERE / "dock_dodge.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     tray_cls = next((node for node in ast.walk(tree)
                      if isinstance(node, ast.ClassDef) and node.name == "TrayApp"),
@@ -270,41 +271,46 @@ def main() -> int:
     tray._foreground_hits_dock = original_hit
 
     # ==================================================================
-    section("5. 自动显隐的编排（打桩判据，验节奏）")
+    section("5. 自动显隐的编排（打桩探测，验节奏）")
     # ==================================================================
+    # 注意打桩的位置：判断已经收进 `DockDodge` 了，所以要桩在
+    # `dodge.covering_windows()` 上，而不是 `tray._foreground_hits_dock`。
     dock_widget = tray.dock
+    dodge = tray.dodge
+    original_fs = tray._foreground_is_fullscreen
+    original_covering = dodge.covering_windows
+    FAKE = [(1, (0, 900, 1920, 1080), "FakeWindow", "假窗口")]
+
+    dodge.probe_enabled = True          # 离屏下默认关掉探测，这里手动打开
     tray._foreground_is_fullscreen = lambda: False
-    tray._foreground_hits_dock = lambda: True
-    tray._fs_streak = 0
-    tray._normal_streak = 0
+    dodge.covering_windows = lambda: list(FAKE)
+    dodge._last_switch = 0.0
     if not dock_widget.isVisible():
         dock_widget.show_bar()
         pump(app, 0.2)
 
     tray._auto_show_tick()
-    check("第一次 tick 只累计、不立刻隐藏（防抖）",
-          dock_widget.isVisible() and tray._fs_streak == 1,
-          f"visible={dock_widget.isVisible()} streak={tray._fs_streak}")
-    tray._auto_show_tick()
-    check("连续两次确认 → 菜单栏让开", not dock_widget.isVisible())
-    check("记住了「是因为让开才藏的」", tray._dock_hidden_for_fullscreen is True)
+    pump(app, 0.25)
+    check("遮挡出现 → 第一次就隐藏（不延迟，需求要求跟手）",
+          not dock_widget.isVisible())
 
-    # 窗口不再重叠 → 两次确认后回来
-    tray._foreground_hits_dock = lambda: False
-    tray._normal_streak = 0
+    # 窗口挪走 / 关闭 → 自己回来
+    dodge.covering_windows = lambda: []
+    dodge._last_switch = 0.0
     tray._auto_show_tick()
-    tray._auto_show_tick()
-    check("不再重叠后 → 菜单栏自己回来", dock_widget.isVisible())
-    check("清掉了「让开」标记", tray._dock_hidden_for_fullscreen is False)
+    pump(app, 0.25)
+    check("不再遮挡后 → 菜单栏自己回来", dock_widget.isVisible())
 
     # 用户主动隐藏的优先级最高
     dock_widget.hide_self()
     pump(app, 0.1)
-    tray._foreground_hits_dock = lambda: True
-    tray._fs_streak = 0
+    dodge.covering_windows = lambda: list(FAKE)
+    dodge._last_switch = 0.0
     for _ in range(3):
         tray._auto_show_tick()
-    check("用户主动隐藏时，重叠也不弹回来", not dock_widget.isVisible())
+        pump(app, 0.08)
+    check("用户主动隐藏时，遮挡也不弹回来", not dock_widget.isVisible())
+
     tray.toggle_dock()                      # 还原，别影响后面的用例
     pump(app, 0.2)
 
@@ -315,43 +321,120 @@ def main() -> int:
     if not dock_widget.isVisible():
         dock_widget.show_bar()
         pump(app, 0.15)
-    tray._foreground_is_fullscreen = lambda: False
-    tray._foreground_hits_dock = lambda: True
-    tray._fs_streak = 0
-    tray._normal_streak = 0
+    dodge.covering_windows = lambda: list(FAKE)
+    dodge._last_switch = 0.0
     tray._auto_show_tick()
-    tray._auto_show_tick()
+    pump(app, 0.25)
     check("面板开着、但别的窗口压上来 → 菜单栏仍要让开",
           not dock_widget.isVisible())
 
-    tray._foreground_hits_dock = lambda: False
-    tray._normal_streak = 0
+    dodge.covering_windows = lambda: []
+    dodge._last_switch = 0.0
     tray._auto_show_tick()
-    tray._auto_show_tick()
+    pump(app, 0.25)
     check("面板开着、没别的窗口压上来 → 菜单栏稳住显示",
           dock_widget.isVisible())
     browser.hide()
     pump(app, 0.15)
 
+    dodge.covering_windows = original_covering
     tray._foreground_is_fullscreen = original_fs
-    tray._foreground_hits_dock = original_hit
-    tray._fs_streak = 0
-    tray._normal_streak = 0
+    dodge._last_switch = 0.0
 
     # ==================================================================
-    section("6. 平台闸门与节奏")
+    section("6. 平台闸门、开关与节奏")
     # ==================================================================
     check("离屏平台不做真实窗口探测（返回 False 而不是瞎猜）",
           tray._foreground_hits_dock() is False)
-    check(f"检查间隔够快（{AUTO_SHOW_INTERVAL}ms ≤ 500ms），打开窗口能及时让开",
+    check(f"轮询间隔够快（{AUTO_SHOW_INTERVAL}ms ≤ 500ms），打开窗口能及时让开",
           AUTO_SHOW_INTERVAL <= 500, str(AUTO_SHOW_INTERVAL))
     check("间隔是个具名常量，不是散落的魔法数字",
-          "QTimer.singleShot(AUTO_SHOW_INTERVAL" in source)
+          "setInterval(POLL_INTERVAL)" in dodge_source)
     check("源码里不再有写死的 1200 定时（原来那样要等 2.4 秒）",
           "singleShot(1200, self._auto_show_tick)" not in source)
-    check("探测方法名与语义对得上（hits_dock）",
-          hasattr(tray, "_foreground_hits_dock")
-          and hasattr(tray, "_should_avoid_dock"))
+    check("避让逻辑集中在 DockDodge（tray 里不再自己 show/hide）",
+          "DockDodge" in source and hasattr(tray, "dodge"))
+
+    # 开关：关掉之后回到"只有全屏才让开"的老行为
+    check("有「窗口遮挡时自动隐藏菜单栏」这个配置项",
+          "dock_avoid_overlap" in cfg.data, str(sorted(cfg.data))[:120])
+    cfg.set("dock_avoid_overlap", False)
+    dodge.probe_enabled = True
+    tray._foreground_is_fullscreen = lambda: False
+    dodge.covering_windows = lambda: list(FAKE)
+    # ⚠️ `_desired_visible()` 读的是 `_covered` 这个**已被算出来**的字段，
+    #    不是现去枚举窗口。所以必须先 evaluate 一次让它反映假遮挡，
+    #    否则测的是上一轮的陈旧状态（这条用例原来就是这么"假通过"的）。
+    dodge._last_switch = 0.0
+    dodge.evaluate()
+    check("关掉开关后：普通窗口压上来不再触发隐藏",
+          dodge._desired_visible() is True)
+    cfg.set("dock_avoid_overlap", True)
+    dodge._last_switch = 0.0
+    dodge.evaluate()
+    check("打开开关后：普通窗口压上来会触发隐藏",
+          dodge._desired_visible() is False)
+    dodge.covering_windows = original_covering
+    tray._foreground_is_fullscreen = original_fs
+    dodge.probe_enabled = False
+
+    # ==================================================================
+    section("7. 生命周期与状态收敛")
+    # ==================================================================
+    check(f"WinEvent 钩子只挂必需的几段（{len(dodge._hooks)} 段 ≤ 3），"
+          "不是 EVENT_MIN~EVENT_MAX 全量",
+          len(dodge._hooks) <= 3, str(len(dodge._hooks)))
+    check("每段钩子都留了回调引用（不留会被 GC 掉 → 进程崩）",
+          len(dodge._hook_procs) == len(dodge._hooks),
+          f"{len(dodge._hook_procs)} vs {len(dodge._hooks)}")
+
+    # 动画期间不许被 `_apply` 强行插一脚（否则会边滑边被反向拽回）
+    dodge._animating = True
+    before_visible = dock_widget.isVisible()
+    dodge._apply(not before_visible)
+    check("动画进行中 `_apply` 不插入新的显隐",
+          dock_widget.isVisible() == before_visible)
+    dodge._animating = False
+
+    # 「回到桌面自动显示」关掉后：本模块不主动改显隐（保持老行为）
+    saved_auto = cfg.get("dock_auto_show", True)
+    saved_overlap = cfg.get("dock_avoid_overlap", True)
+    cfg.set("dock_visible", True)
+    cfg.set("dock_hidden_by_user", False)
+    cfg.set("dock_auto_show", False)
+    cfg.set("dock_avoid_overlap", True)
+    dodge.probe_enabled = True
+    tray._foreground_is_fullscreen = lambda: False
+    dodge.covering_windows = lambda: list(FAKE)
+    dodge._last_switch = 0.0
+    dodge.evaluate()
+    hidden_before = dock_widget.isHidden()
+    dodge.covering_windows = lambda: []
+    dodge._last_switch = 0.0
+    dodge.evaluate()
+    check("关掉「回到桌面自动显示」后，遮挡消失也不主动弹回来",
+          dock_widget.isHidden() == hidden_before)
+
+    cfg.set("dock_auto_show", saved_auto)
+    dodge._last_switch = 0.0
+    dodge.evaluate()
+    check("把「回到桌面自动显示」打开后，菜单栏自己回来",
+          dock_widget.isVisible())
+    cfg.set("dock_avoid_overlap", saved_overlap)
+
+    # 收尾：stop() 必须把钩子、动画标记、点击穿透都清掉
+    dodge.probe_enabled = False
+    dodge.covering_windows = original_covering
+    tray._foreground_is_fullscreen = original_fs
+    dodge.stop()
+    check("stop() 之后钩子全部摘掉", len(dodge._hooks) == 0,
+          str(len(dodge._hooks)))
+    check("stop() 之后没有任何残留回调引用", len(dodge._hook_procs) == 0)
+    check("stop() 之后 _animating 归零（否则再 start 就永远不动）",
+          dodge._animating is False)
+    check("stop() 之后点击穿透处于关闭状态（否则菜单栏会永久点不动）",
+          dodge._click_through is False)
+    check("stop() 之后轮询定时器已停", not dodge._poll.isActive())
 
     # 收尾
     try:

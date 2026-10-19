@@ -24,6 +24,7 @@ from qt_compat import (
 )
 
 import config
+import dock_dodge
 import engine
 import nest
 import safety
@@ -31,6 +32,7 @@ import single_instance
 import theme as theme_mod
 from desktop_browser import DesktopBrowser
 from dock import DockBar
+from dock_dodge import DockDodge
 from panel import MainPanel
 from settings import SettingsDialog
 from widgets import app_icon
@@ -39,16 +41,15 @@ from widgets import app_icon
 # --------------------------------------------------------------------------
 # 前台窗口"压住菜单栏"的判定
 # --------------------------------------------------------------------------
-# 横向至少压住这么多像素、纵向至少压住这么多像素，才算"真的重叠"。
-# 只擦到一条边、只在角上碰一下都不算 —— 否则拖窗口经过菜单栏、
-# 或者把窗口贴着菜单栏顶边摆好，菜单栏都会神经质地闪一下。
-DOCK_HIT_MIN_X = 24
-DOCK_HIT_MIN_Y = 6
+# 判据本身搬去了 `dock_dodge.py`（那里要枚举所有窗口，逻辑比"只看前台"重得多）。
+# 这里 re-export 一份，老的调用点和自检不用改。
+# 下面这两个常量现在只在自检里用到，真正生效的是 dock_dodge 里那份。
+DOCK_HIT_MIN_X = dock_dodge.DOCK_HIT_MIN_X
+DOCK_HIT_MIN_Y = dock_dodge.DOCK_HIT_MIN_Y
+rects_overlap = dock_dodge.rects_overlap
 
-# 菜单栏该不该露面的检查节奏。原来 1200ms，但那意味着"打开一个压住菜单栏的
-# 窗口"最长要等 2.4 秒（两次确认）菜单栏才让开，观感上像"没反应"。
-# 400ms × 2 次确认 = 0.8 秒，既跟得上，又足够滤掉窗口打开动画的中间帧。
-AUTO_SHOW_INTERVAL = 400
+# 菜单栏该不该露面的检查节奏（兼容旧名字；真正的周期源在 DockDodge 里）
+AUTO_SHOW_INTERVAL = dock_dodge.POLL_INTERVAL
 
 
 def rects_overlap(a, b, min_x: int = 1, min_y: int = 1) -> bool:
@@ -232,6 +233,12 @@ class TrayApp(QWidget):
         # 底边才会正好落在菜单栏顶边之上（菜单栏变高也不会被压住）。
         self.desktop_browser.set_bottom_reserve(self._dock_reserve)
 
+        # ---- 窗口避让（Nexus 风格的 Window Dodge）----
+        # 所有"该不该显示菜单栏"的判断都收在 DockDodge 里，别处不要再直接
+        # show/hide —— 否则多个事件源会互相覆盖状态。
+        self.dodge = DockDodge(self, self.dock, cfg, self)
+        self.dodge.start()
+
         # ---- 托盘 ----
         # 托盘图标直接复用程序图标（同一套"抽屉"造型，见 widgets.app_icon）
         self.tray = QSystemTrayIcon(app_icon(), self)
@@ -344,6 +351,11 @@ class TrayApp(QWidget):
         action_auto.setCheckable(True)
         action_auto.setChecked(bool(self.cfg.get("dock_auto_show", True)))
         action_auto.triggered.connect(lambda _checked: self._toggle_auto_show())
+
+        action_dodge = self.menu.addAction("窗口遮挡时自动隐藏菜单栏")
+        action_dodge.setCheckable(True)
+        action_dodge.setChecked(bool(self.cfg.get("dock_avoid_overlap", True)))
+        action_dodge.triggered.connect(lambda _checked: self._toggle_dodge())
 
         self.menu.addSeparator()
 
@@ -578,6 +590,7 @@ class TrayApp(QWidget):
             self.cfg.set("dock_hidden_by_user", False)     # 手动打开 → 恢复自动显示
             self.dock.show_bar()
         self.rebuild_tray_menu()
+        self.dodge.notify_changed()
 
     def _toggle_auto_show(self) -> None:
         """开关「回到桌面自动显示菜单栏」。"""
@@ -587,11 +600,24 @@ class TrayApp(QWidget):
             self.cfg.set("dock_hidden_by_user", False)
             self.dock.show_bar()
         self.rebuild_tray_menu()
+        self.dodge.notify_changed()
+
+    def _toggle_dodge(self) -> None:
+        """开关「窗口遮挡时自动隐藏菜单栏」。
+
+        关掉之后菜单栏会**立刻回到原来的行为**（只对全屏让开），
+        不用等下一次遮挡发生。
+        """
+        enabled = not bool(self.cfg.get("dock_avoid_overlap", True))
+        self.cfg.set("dock_avoid_overlap", enabled)
+        self.rebuild_tray_menu()
+        self.dodge.notify_changed()
 
     def _on_dock_hidden(self) -> None:
         """菜单栏上的「隐藏」按钮点了之后：记住是用户主动隐藏的。"""
         self.cfg.set("dock_hidden_by_user", True)
         self.rebuild_tray_menu()
+        self.dodge.notify_changed()
         self.tray.showMessage(
             config.APP_NAME_FULL,
             "菜单栏已隐藏。\n右键托盘图标 → 勾选「显示底部菜单栏」可以再打开。",
@@ -758,134 +784,48 @@ class TrayApp(QWidget):
             return False
 
     def _foreground_hits_dock(self) -> bool:
-        """前台窗口的矩形有没有**真的压在菜单栏上**。
+        """有没有窗口的矩形**真的压在菜单栏上**。
 
-        需求：打开新窗口时，不与菜单栏重叠就正常显示，重叠就自动隐藏。
-
-        它和 `_foreground_is_fullscreen()` 是两条互补的判据：
-        * 那条看"窗口够不够大"（全屏 / 最大化）——挡住的往往是整块屏幕；
-        * 这条直接量**两块矩形相不相交**——管的是"窗口不大、但刚好压在菜单栏上"。
-
-        两边都用 Win32 的 `GetWindowRect` 拿**物理像素**，不掺 Qt 的坐标：
-        高 DPI 下 `dock.geometry()` 是逻辑像素（DIP），直接和 Win32 矩形比
-        会差一个缩放倍数，重叠判定就全错了。
-
-        排除项与全屏判定保持一致：本程序自己的窗口（收纳面板本来就贴着菜单栏，
-        算进去会导致"一打开面板菜单栏就消失"）、桌面本身、最小化窗口。
+        ⚠️ 名字里的 `foreground` 是历史包袱：第一版只查**前台**窗口，所以
+        "两个窗口叠在一起、上面那个没盖住菜单栏、下面那个盖住了"会漏判，
+        而且前台窗口一换判据就跳。现在内部改成**枚举所有可见顶层窗口**
+        （见 `dock_dodge.DockDodge.covering_windows`），名字保留只是为了
+        不打断已有的调用点和自检。
         """
+        # 离屏平台没有真正的窗口管理器，窗口矩形没有意义（自检跑在这里）
         try:
-            dock = getattr(self, "dock", None)
-            if dock is None or not dock.isVisible():
-                return False
-            # 离屏平台没有真正的窗口管理器，窗口矩形没有意义（自检跑在这里）
             if QApplication.platformName() == "offscreen":
                 return False
-
-            user32 = ctypes.windll.user32
-            hwnd = user32.GetForegroundWindow()
-            if not hwnd:
-                return False
-            if self._foreground_is_self():         # 自己的窗口不算
-                return False
-            if self._desktop_is_foreground():      # 桌面自己不算
-                return False
-            if user32.IsIconic(hwnd):              # 最小化不算
-                return False
-            if not user32.IsWindowVisible(hwnd):
-                return False
-
-            dock_rect = wintypes.RECT()
-            if not user32.GetWindowRect(int(dock.winId()), ctypes.byref(dock_rect)):
-                return False
-            win_rect = wintypes.RECT()
-            if not user32.GetWindowRect(hwnd, ctypes.byref(win_rect)):
-                return False
-
-            return rects_overlap(
-                (win_rect.left, win_rect.top, win_rect.right, win_rect.bottom),
-                (dock_rect.left, dock_rect.top, dock_rect.right, dock_rect.bottom),
-                DOCK_HIT_MIN_X, DOCK_HIT_MIN_Y)
+        except Exception:
+            return False
+        dodge = getattr(self, "dodge", None)
+        if dodge is None:
+            return False
+        try:
+            return bool(dodge.covering_windows())
         except Exception:
             return False
 
     def _should_avoid_dock(self) -> bool:
-        """该不该把菜单栏收起来：全屏/最大化 **或者** 真的压在菜单栏上。"""
+        """该不该把菜单栏收起来：全屏/最大化 **或者** 有窗口压在菜单栏上。"""
         if self._foreground_is_fullscreen():
             return True
         return self._foreground_hits_dock()
 
     def _auto_show_tick(self) -> None:
-        """定时检查菜单栏该不该露面。
+        """让 `DockDodge` 重算一次"菜单栏该不该露面"。
 
-        两条规则：
-        * 人回到桌面 → 自动显示（除非用户主动点过隐藏）；
-        * 有人全屏看视频 / 演示，或者**新开的窗口压在菜单栏上** → 自动让开；
-          不再遮挡之后再自己回来。
+        判断已经**全部收进 `DockDodge.evaluate()`** 了（那里统一处理
+        "用户主动隐藏 / 窗口遮挡 / 鼠标唤回保持期 / 正在交互"这些状态），
+        这里只留一个兼容入口：启动时的 `singleShot` 和自检都还在用它。
 
-        ⚠️ 这里**只动窗口的可见性**（`show_bar` / `hide_bar`），
-        绝不改 `dock_visible` / `dock_hidden_by_user` 这些状态变量——
-        否则"打开收纳面板"会被误当成"用户把菜单栏关了"，之后再也不自动弹回来。
-
-        **防闪烁**：只有当"要让开"这个状态**连续两次 tick（约 0.8 秒）都成立**
-        才真的隐藏；恢复则要求"不需要让开"连续两次成立。这样：
-        * 切换程序、窗口动画、拖动窗口这些瞬时状态不会引起显隐抖动；
-        * 用户真的最大化 / 开了个压住菜单栏的窗口时，0.8 秒后让开，
-          感知上依然是"立刻"。
+        ⚠️ 这里**不再自己排下一次**了：周期检测统一由 `DockDodge._poll`
+        （120ms + WinEvent 事件驱动）负责。两套轮询同时跑会互相踩。
         """
         try:
-            if bool(self.cfg.get("dock_hidden_by_user", False)):
-                # 用户手动关的：保持隐藏，绝不自动恢复
-                self._fs_streak = 0
-                self._normal_streak = 0
-                return
-            if not bool(self.cfg.get("dock_auto_show", True)):
-                self._fs_streak = 0
-                self._normal_streak = 0
-                return
-
-            # 收纳面板开着（翻页 / 搜索）时菜单栏必须稳住：不让开，也不隐藏。
-            #
-            # 但有个例外：如果这时**别的**窗口压了上来（用户开了浏览器又切过去），
-            # 那就按正常规则让开。"面板还开着"不等于"菜单栏该一直挡着别人"——
-            # 面板只是浮层，前台已经是别人的窗口了。
-            if self._dock_in_use() and not self._foreground_hits_dock():
-                self._dock_hidden_for_fullscreen = False
-                self._fs_streak = 0
-                self._normal_streak = 0
-                if not self.dock.isVisible() and bool(self.cfg.get("dock_visible", True)):
-                    self.dock.show_bar()
-                    self.rebuild_tray_menu()
-                return
-
-            fullscreen = self._should_avoid_dock()
-            if fullscreen:
-                self._normal_streak = 0
-                self._fs_streak += 1
-                # 连续两次确认才让开，避开窗口打开动画等瞬时状态
-                if (self._fs_streak >= 2 and self.dock.isVisible()
-                        and bool(self.cfg.get("dock_avoid_fullscreen", True))):
-                    self.dock.hide_bar()
-                    self._dock_hidden_for_fullscreen = True
-                return
-
-            self._fs_streak = 0
-            if not self.dock.isVisible():
-                # 该不该恢复：因为我们让开过，或者配置本来就是要显示的
-                if self._dock_hidden_for_fullscreen \
-                        or bool(self.cfg.get("dock_visible", True)):
-                    self._normal_streak += 1
-                    if self._normal_streak >= 2:
-                        self._dock_hidden_for_fullscreen = False
-                        self._normal_streak = 0
-                        self.dock.show_bar()
-                        self.rebuild_tray_menu()
-            else:
-                # 已经显示着，就别再调 show_bar——重复 show + raise 本身就会闪
-                self._normal_streak = 0
+            self.dodge.evaluate()
         except Exception as exc:
             config.log(f"菜单栏自动显隐失败：{type(exc).__name__}: {exc}")
-        finally:
-            QTimer.singleShot(AUTO_SHOW_INTERVAL, self._auto_show_tick)
 
     # ------------------------------------------------------------------
     # 窗口
@@ -1270,6 +1210,14 @@ class TrayApp(QWidget):
 
     def shutdown(self) -> None:
         """退出前：还原桌面 + 把后台线程收干净。"""
+        # 窗口避让的 WinEvent 钩子和定时器必须先拆：钩子回调是系统在消息循环里
+        # 调进来的，解释器拆栈之后被回调进来就是崩溃。
+        dodge = getattr(self, "dodge", None)
+        if dodge is not None:
+            try:
+                dodge.stop()
+            except Exception:
+                pass
         worker = self._scan
         if worker is not None and worker.isRunning():
             worker.wait(4000)

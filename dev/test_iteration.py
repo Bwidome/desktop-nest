@@ -481,52 +481,46 @@ def main() -> int:
         tray._desktop_is_foreground = original_desktop
 
     print()
-    print("── BUG3. 防抖：不会频繁闪现 ──")
+    print("── BUG3. 响应速度与防抖 ──")
+    # 现在的实现是"事件驱动 + 120ms 轮询 + 最小切换间隔 300ms"：
+    #   · 第一次响应要**立刻**（需求：不能让菜单栏明显延迟响应）
+    #   · 但不能贴边抖动时来回闪（靠 MIN_SWITCH_GAP，不是靠"两次确认"）
     original_fs = tray._foreground_is_fullscreen
     try:
-        # 先接管"前台是不是全屏"的判断，否则测不了：
-        # 跑测试时真实前台窗口很可能就是最大化的浏览器（本机实测 1619x1036，
-        # 覆盖 81%），那样 dock 会被正常地藏起来，起点就不成立了。
+        tray.dodge.probe_enabled = True        # 让避让逻辑真的跑（离屏默认关）
         tray._foreground_is_fullscreen = lambda: False
+        tray.dodge._last_switch = 0.0
         dock.show_bar()
         pump(0.4)
-        tray._fs_streak = 0
-        tray._normal_streak = 0
-        check("防抖起点：菜单栏可见且计数归零",
-              dock.isVisible() and tray._fs_streak == 0,
-              f"visible={dock.isVisible()} fs={tray._fs_streak}")
+        check("起点：菜单栏可见", dock.isVisible())
 
-        # 伪造「一直全屏」：必须连续两次才隐藏，避免动画瞬间就闪掉
+        # 遮挡出现 → 第一次 tick 就隐藏
         tray._foreground_is_fullscreen = lambda: True
+        tray.dodge._last_switch = 0.0
         tray._auto_show_tick()
-        still_visible_after_one = dock.isVisible()
-        check("全屏第一次 tick 不隐藏（防抖）", still_visible_after_one,
-              f"fs_streak={tray._fs_streak}")
-        tray._auto_show_tick()
-        hidden_after_two = not dock.isVisible()
-        check("全屏连续两次 tick 才隐藏", hidden_after_two)
+        pump(0.3)
+        check("遮挡出现后立刻隐藏（不用等第二次 tick）", not dock.isVisible())
 
-        # 恢复：也要连续两次
+        # 遮挡消失 → 也立刻恢复
         tray._foreground_is_fullscreen = lambda: False
-        tray._normal_streak = 0
+        tray.dodge._last_switch = 0.0
         tray._auto_show_tick()
-        check("恢复第一次 tick 不显示（防抖）", not dock.isVisible())
-        tray._auto_show_tick()
-        check("恢复连续两次 tick 才显示", dock.isVisible())
+        pump(0.3)
+        check("遮挡消失后立刻恢复", dock.isVisible())
 
-        # 抖动场景：全屏/普通交替不应该导致反复显隐
+        # 抖动场景：全屏/普通交替翻转，不该跟着来回闪
+        tray.dodge._last_switch = 0.0
         dock.show_bar()
         pump(0.2)
-        tray._fs_streak = 0
-        tray._normal_streak = 0
-        stays = True
+        changes = 0
         for i in range(6):
             tray._foreground_is_fullscreen = (lambda v: (lambda: v))(i % 2 == 0)
             before = dock.isVisible()
             tray._auto_show_tick()
             if dock.isVisible() != before:
-                stays = False
-        check("全屏/普通交替抖动时菜单栏不闪隐闪现", stays)
+                changes += 1
+        check("全屏/普通交替抖动时菜单栏不闪隐闪现", changes <= 1,
+              f"切换了 {changes} 次")
     finally:
         tray._foreground_is_fullscreen = original_fs
         tray._fs_streak = 0
