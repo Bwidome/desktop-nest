@@ -333,7 +333,7 @@ python dev\run_all.py --python <解释器>
 python dev\run_all.py test_core test_nest
 ```
 
-当前规模：**27 个套件、约 1548 项断言**，绝大多数跑在离屏平台（`QT_QPA_PLATFORM=offscreen`）。
+当前规模：**27 个套件、约 1550 项断言**，绝大多数跑在离屏平台（`QT_QPA_PLATFORM=offscreen`）。
 
 其中两个套件需要**真实桌面**（运行时会短暂弹出测试窗口）：
 
@@ -342,7 +342,7 @@ python dev\run_all.py test_core test_nest
 | `dev/test_dodge_live.py` | 29 | 真窗口覆盖 / 移走 / 最小化 / 关闭、**遮挡时鼠标碰底部不弹**、动画位移采样 |
 | `dev/test_dodge_acceptance.py` | 32 | DPI 换算、自身窗口不自我隐藏、双窗口叠加、遮挡时鼠标碰底部不弹、`WindowFromPoint` 命中测试、cloaked 过滤、钩子不重复注册 |
 
-离屏套件里 `dev/test_dock_edge.py`（29 项）专门盯这次修的两个 bug：边缘唤回的「只在桌面」闸门、保持期不许压过遮挡、两个右键菜单里的「隐藏菜单栏」。
+离屏套件里 `dev/test_dock_edge.py`（31 项）专门盯这次修的两个 bug：边缘唤回的「只在桌面」闸门、保持期不许压过遮挡、三个右键入口里的「隐藏菜单栏」。
 
 > 在受限（沙箱）环境里，`dev/test_round6.py` 有 2 项会失败：它们需要读取 `C:\$Recycle.Bin` 校验“真的删进回收站”，读不到即失败。这与功能无关，在普通终端下全绿。
 
