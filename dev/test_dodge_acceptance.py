@@ -4,7 +4,7 @@
 窗口避让 —— 验收清单**剩余项**的实机测试
 =========================================
 
-`dev/test_dodge_live.py` 覆盖了"遮挡 → 隐藏 → 移走 → 回来 → 边缘唤回"这条主线。
+`dev/test_dodge_live.py` 覆盖了"遮挡 → 隐藏 → 移走 → 回来"这条主线。
 这个文件补的是主线之外、但验收清单里点名要求的几条：
 
   A. DPI 缩放：物理像素（Win32）与逻辑像素（Qt）的换算必须自洽
@@ -13,8 +13,8 @@
      （它们和菜单栏同进程，按 PID 排除；但要有实测证据）
   C. 两个窗口互相覆盖时，不能因为其中一个失焦就错误显示
      （判据必须枚举**所有**窗口，而不是只看前台）
-  D. 唤回之后菜单栏真的能点到（用 `WindowFromPoint` 做命中测试，
-     不是只看"窗口可见"）
+  D. 遮挡时鼠标碰屏幕底部**不许**把菜单栏弹出来（用户报的 bug），
+     以及"窗口挪走之后同一位置真的能点到"（`WindowFromPoint` 命中测试）
   E. DWM cloaked（隐形窗口）过滤：被 cloaked 的窗口不该继续压着菜单栏
   F. 反复 stop / start 不会重复注册事件钩子
 
@@ -377,9 +377,11 @@ def main() -> int:
             settle()
 
             # ==============================================================
-            section("D. 唤回之后真的能点到（命中测试，不只看「可见」）")
+            section("D. 遮挡时鼠标碰屏幕底部 → **不许**弹出来（用户报的 bug）")
             # ==============================================================
-            # 先让它被 A 遮挡并隐藏，再走边缘唤回，然后对菜单栏中心做命中测试
+            # 旧行为是"鼠标停在菜单栏那块就唤回来"。结果全屏看视频时，
+            # 鼠标往下一甩（去够播放控制条）菜单栏就冒出来盖在视频上。
+            # 现在的规则：只有**前台就是桌面**、且没人占着菜单栏那块时才唤回。
             user32.SetWindowPos(hwnd_a, 0, left - 120, top - 220,
                                 (right - left) + 260, (bottom - top) + 300,
                                 SWP_NOACTIVATE)
@@ -403,34 +405,42 @@ def main() -> int:
                 moved = move_cursor_onto_dock(cx, cy)
                 if not moved:
                     note("本环境的沙箱拒绝了移动光标（SetCursorPos 反复失败），"
-                         "边缘唤回与命中测试这一组无法验证",
+                         "「遮挡时鼠标碰底部不弹」这一条无法验证",
                          f"QCursor={dock_dodge.QCursor.pos()} 目标物理=({cx},{cy})")
                 else:
-                    ok = wait_for(lambda: dock.isVisible(), 5.0, "边缘唤回")
-                    if not ok:
-                        print(f"      [调试] 失败时：peek="
-                              f"{max(0.0, dodge._peek_until - time.monotonic()):.2f} "
-                              f"edge_since={dodge._edge_since:.2f} "
-                              f"hidden={dock.isHidden()} "
-                              f"occluded={dodge._occluded} "
-                              f"animating={dodge._animating} "
-                              f"locked={getattr(dock, '_slide_locked', None)}")
-                    check("鼠标停在底部 → 菜单栏被唤回", ok)
+                    # 光标停在菜单栏那块上，等足 1.2 秒（远超 EDGE_DWELL）
+                    pump(1.2)
                     settle()
-                    hit_shown = window_at(cx, cy)
-                    check("唤回后，同一位置命中的就是菜单栏（图标可以点了）",
-                          hit_shown == int(dock.winId()),
-                          f"命中 hwnd={hit_shown} dock={int(dock.winId())} "
-                          f"class={class_of(hit_shown)!r}")
-                    check("唤回后没有残留的点击穿透位",
-                          (user32.GetWindowLongPtrW(int(dock.winId()), GWL_EXSTYLE)
-                           & WS_EX_TRANSPARENT) == 0)
+                    check("窗口压着菜单栏时，鼠标停在屏幕底部 → 菜单栏**不弹**"
+                          "（这正是用户报的 bug）",
+                          not dock.isVisible(),
+                          f"visible={dock.isVisible()} "
+                          f"peek={max(0.0, dodge._peek_until - time.monotonic()):.2f} "
+                          f"onDesktop={dodge._on_desktop()} "
+                          f"occluded={dodge._occluded}")
+                    check("没有留下「唤回保持期」（否则切回桌面还会赖一会儿）",
+                          dodge._peek_until == 0.0,
+                          f"peek={dodge._peek_until}")
             finally:
                 dock_dodge.EDGE_DWELL, dock_dodge.PEEK_HOLD = old_dwell, old_hold
                 try:
                     user32.SetCursorPos(old_cursor.x, old_cursor.y)
                 except Exception:
                     pass
+
+            # 把窗口挪走 → 它自己回来，然后验命中测试（证明真的能点到）
+            user32.SetWindowPos(hwnd_a, 0, 60, 60, 420, 300, SWP_NOACTIVATE)
+            ok = wait_for(lambda: dock.isVisible(), 3.0, "挪走后显示")
+            check("遮挡窗口挪走 → 菜单栏自己回来（不用鼠标去唤）", ok)
+            settle()
+            hit_shown = window_at(cx, cy)
+            check("回来后同一位置命中的就是菜单栏（图标可以点了）",
+                  hit_shown == int(dock.winId()),
+                  f"命中 hwnd={hit_shown} dock={int(dock.winId())} "
+                  f"class={class_of(hit_shown)!r}")
+            check("没有残留的点击穿透位",
+                  (user32.GetWindowLongPtrW(int(dock.winId()), GWL_EXSTYLE)
+                   & WS_EX_TRANSPARENT) == 0)
 
             # ==============================================================
             section("E. DWM cloaked（隐形窗口）过滤")

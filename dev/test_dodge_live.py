@@ -42,11 +42,9 @@
   4 把窗口移走                    → 重新显示
   5 最小化遮挡窗口                → 重新显示
   6 关闭遮挡窗口                  → 重新显示
-  7 鼠标移到屏幕底部              → 边缘唤回
-  8 唤回后菜单栏没有点击穿透（能正常点图标）
-  9 鼠标移开 + 保持期结束         → 重新隐藏
- 10 反复显隐之后位置不漂移
- 11 关掉新开关后 → 恢复"只有全屏才让开"
+  7 遮挡时鼠标碰屏幕底部          → **不弹出来**（用户报的 bug）
+  8 反复显隐之后位置不漂移
+  9 关掉新开关后 → 恢复"只有全屏才让开"
 
 用法：python dev/test_dodge_live.py
 退出码：全部通过 0，否则 1。
@@ -368,8 +366,10 @@ def main() -> int:
         settle()
 
         # ------------------------------------------------------------------
-        section("6. 边缘唤回：鼠标移到屏幕底部")
+        section("6. 遮挡时鼠标碰屏幕底部 → 不许弹出来（用户报的 bug）")
         # ------------------------------------------------------------------
+        # 旧行为：鼠标落进菜单栏那块矩形就唤回来。全屏看视频时鼠标往下一甩
+        # 就冒出来盖在视频上。现在只在前台**就是桌面**时才允许唤回。
         user32.ShowWindow(hwnd, SW_RESTORE)
         pump(0.15)
         probe_covers_dock()
@@ -397,31 +397,21 @@ def main() -> int:
                     break
             if not moved:
                 note("本环境的沙箱拒绝了移动光标（SetCursorPos 反复失败），"
-                     "边缘唤回无法验证",
+                     "「遮挡时鼠标碰底部不弹」无法验证",
                      f"QCursor={dock_dodge.QCursor.pos()} 目标物理=({cx},{cy})")
             else:
-                ok = wait_for(lambda: dock.isVisible(), 5.0, "边缘唤回")
-                if not ok:
-                    print(f"      [调试] QCursor={dock_dodge.QCursor.pos()}  "
-                          f"dockGeo={dock.frameGeometry()}  "
-                          f"onEdge={dodge._mouse_on_edge()}  "
-                          f"hidden={dock.isHidden()} "
-                          f"occluded={dodge._occluded}  "
-                          f"peek={max(0.0, dodge._peek_until - time.monotonic()):.2f}")
-                check("鼠标停在底部菜单栏区域 → 菜单栏被唤回", ok)
+                pump(1.2)                    # 远超 EDGE_DWELL
                 settle()
-                check("唤回后菜单栏可以点（没有残留点击穿透）",
+                check("窗口压着菜单栏时，鼠标停在屏幕底部 → 菜单栏不弹",
+                      not dock.isVisible(),
+                      f"visible={dock.isVisible()}  "
+                      f"peek={max(0.0, dodge._peek_until - time.monotonic()):.2f}  "
+                      f"onDesktop={dodge._on_desktop()}  "
+                      f"occluded={dodge._occluded}")
+                check("没有留下唤回保持期", dodge._peek_until == 0.0,
+                      f"peek={dodge._peek_until}")
+                check("菜单栏没被弹出来，也就不该有残留的点击穿透位",
                       (ex_style() & WS_EX_TRANSPARENT) == 0, hex(ex_style()))
-                check("唤回后仍处于「遮挡中」状态（松手还会收回去）",
-                      dodge._occluded is True)
-
-            # --------------------------------------------------------------
-            section("7. 鼠标移开 → 保持期过后重新隐藏")
-            # --------------------------------------------------------------
-            user32.SetCursorPos(old_cursor.x, old_cursor.y)
-            ok = wait_for(lambda: not dock.isVisible(), 5.0, "保持期后重新隐藏")
-            check("鼠标离开、窗口还在遮挡 → 过了保持期又收回去", ok)
-            settle()
         finally:
             dock_dodge.EDGE_DWELL, dock_dodge.PEEK_HOLD = old_dwell, old_hold
             try:
@@ -430,7 +420,7 @@ def main() -> int:
                 pass
 
         # ------------------------------------------------------------------
-        section("8. 关闭遮挡窗口 → 重新显示")
+        section("7. 关掉遮挡窗口 → 菜单栏自己回来（不需要鼠标去唤）")
         # ------------------------------------------------------------------
         user32.PostMessageW(hwnd, 0x0010, 0, 0)       # WM_CLOSE
         ok = wait_for(lambda: dock.isVisible(), 4.0, "关闭后显示")
@@ -446,7 +436,7 @@ def main() -> int:
         check("探针进程已经退出", probe.poll() is not None)
 
         # ------------------------------------------------------------------
-        section("9. 关掉新开关 → 恢复「只有全屏才让开」")
+        section("8. 关掉新开关 → 恢复「只有全屏才让开」")
         # ------------------------------------------------------------------
         cfg.set("dock_avoid_overlap", False)
         probe2, hwnd2 = spawn_probe(60, 60, 420, 300)

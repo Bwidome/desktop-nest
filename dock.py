@@ -727,6 +727,10 @@ class DockBar(QWidget):
             force_icon=desktop_glyph_icon(self._icon_size + 4),
         )
         self.apps_flow.add_item(self.desktop_btn)
+        # 「桌面整理」入口是 DockIcon，右键被它自己的 CustomContextMenu 截住，
+        # 不接这一条的话对着它右键什么都不会弹（见 `_show_dock_menu`）。
+        self.desktop_btn.context_requested.connect(
+            lambda _btn, pos: self._show_dock_menu(pos))
 
         # ⚠️ 这里**不再插分隔线**。
         # 应用区是等宽网格（`FlowLayout.unit_size()` 取所有条目里最大的那个），
@@ -990,6 +994,10 @@ class DockBar(QWidget):
         action_down = menu.addAction("右移")
         menu.addSeparator()
         action_remove = menu.addAction("从菜单栏移除")
+        menu.addSeparator()
+        # 用户多半是**对着图标**右键（菜单栏上几乎没有空白可点），
+        # 所以「隐藏菜单栏」两个菜单都要有，不能只在空白处那份里。
+        action_hide_bar = menu.addAction("隐藏菜单栏")
         chosen = popup_menu(menu, pos)
         if chosen is None:
             return
@@ -997,6 +1005,8 @@ class DockBar(QWidget):
             self._launch(path)
         elif chosen is action_reveal:
             engine.open_in_explorer(path)
+        elif chosen is action_hide_bar:
+            self.hide_self()
         elif chosen is action_remove:
             self.cfg.remove_quick(path)
             self.quick_changed.emit()
@@ -1834,6 +1844,21 @@ class DockBar(QWidget):
         super().mouseReleaseEvent(event)
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802
+        """空白处右键 → 菜单栏菜单。"""
+        self._show_dock_menu(event)
+
+    def _show_dock_menu(self, pos=None) -> None:
+        """菜单栏的右键菜单（空白处和「桌面整理」入口共用）。
+
+        `pos` 两种都收：`QContextMenuEvent`（空白处右键直接给的）和
+        全局 `QPoint`（`DockIcon.context_requested` 给的）——
+        `qt_compat.popup_menu()` 已经把这两种入参统一处理过了。
+
+        为什么「桌面整理」入口也要接这个菜单：它和常用图标一样是
+        `DockIcon`，自己设了 `CustomContextMenu` 策略，右键**不会**冒泡到
+        DockBar 的 `contextMenuEvent`。不接的话，对着它右键什么都不会弹——
+        用户想找「隐藏菜单栏」时正好点在那儿，就会以为没这个功能。
+        """
         menu = QMenu(self)
         action_files = menu.addAction("打开桌面收纳面板")
         action_restore_all = menu.addAction("全部还原到桌面")
@@ -1859,10 +1884,14 @@ class DockBar(QWidget):
         action_panel = menu.addAction("打开主面板")
         action_settings = menu.addAction("设置…")
         menu.addSeparator()
-        action_hide = menu.addAction("暂时隐藏菜单栏")
+        # 「隐藏菜单栏」是用户明确要求的入口。走 `hide_self()` 而不是自己
+        # `cfg.set("dock_visible", False)`：那条路还会 `emit hide_requested`，
+        # 托盘菜单的勾选状态、`dock_hidden_by_user` 标记、气泡提示才会一起跟上。
+        # 只改配置不广播的话，托盘菜单会显示成"还开着"，下次点它反而又藏一次。
+        action_hide = menu.addAction("隐藏菜单栏")
         action_quit = menu.addAction("退出程序（并还原桌面）")
 
-        chosen = popup_menu(menu, event)
+        chosen = popup_menu(menu, pos)
         if chosen is None:
             return
         if chosen is action_files:
@@ -1876,8 +1905,7 @@ class DockBar(QWidget):
         elif chosen is action_settings:
             self.open_settings.emit()
         elif chosen is action_hide:
-            self.cfg.set("dock_visible", False)
-            self.hide_bar()
+            self.hide_self()
         elif chosen is action_quit:
             self.quit_app.emit()
 

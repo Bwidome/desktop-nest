@@ -46,9 +46,16 @@
    表现为**菜单栏莫名其妙一直藏着不回来**。这里用 `DwmGetWindowAttribute`
    把它挑出来。
 
-5. **不做鼠标钩子**。
+5. **不做鼠标钩子，而且边缘唤回只在桌面上生效**。
    边缘唤回只是读 `QCursor.pos()`，不安装 `SetWindowsHookEx`、不占用任何
    屏幕区域，所以绝不会拦截用户对底部其他窗口的点击。
+
+   ⚠️ 但"读鼠标位置"本身不够：全屏播放器 / 浏览器里，用户把鼠标甩到屏幕
+   底部是去够播放控制条、状态栏、标签栏的，这时候把菜单栏叫出来纯属添乱
+   （表现就是"鼠标一碰屏幕底部菜单栏就自动弹出来，全屏下也弹"）。
+   所以 `_check_edge()` 前面加了 `_on_desktop()` 闸门：**只有前台就是桌面、
+   且没有任何窗口占着菜单栏那一带时**才允许唤回。其余情况一律不弹——
+   要它回来请用托盘菜单。
 
 6. 坐标口径：
    * 窗口矩形（`GetWindowRect`）→ Win32 **物理像素**。两个矩形都来自同一个
@@ -560,6 +567,10 @@ class DockDodge(QObject):
            （我们自己的窗口本来就被 `covering_windows` 按 PID 排除了，
            所以"面板盖住菜单栏"不会被误判成遮挡。）
 
+           ⚠️ 第 3 条（保持期）**不许压过这一条**：以前它是无条件返回 True，
+           结果"在桌面唤回菜单栏 → 立刻切进全屏视频"时菜单栏会赖在屏幕上
+           最多 2.5 秒。现在只有 `not self._occluded` 时才认保持期。
+
         6. 回到桌面自动显示（原有行为）
         7. 自动显示关掉 → 不让它自动恢复（保持现状）
         """
@@ -569,8 +580,9 @@ class DockDodge(QObject):
         # 2. 用户把"显示底部菜单栏"关了
         if not bool(self.cfg.get("dock_visible", True)):
             return False
-        # 3. 用户刚把鼠标挪到边缘唤回来的 —— 给他一点时间点图标
-        if time.monotonic() < self._peek_until:
+        # 3. 用户刚把鼠标挪到边缘唤回来的 —— 给他一点时间点图标。
+        #    只在"没有任何窗口占着这块地方"时才算数，否则遮挡一发生就该让开。
+        if time.monotonic() < self._peek_until and not self._occluded:
             return True
         # 4. 正在拖菜单栏 / 长按排序
         if self._is_interacting():
@@ -797,7 +809,12 @@ class DockDodge(QObject):
     # 边缘唤回
     # ------------------------------------------------------------------
     def peek(self) -> None:
-        """把菜单栏唤回来，并给一段"别急着再藏"的保持期。"""
+        """把菜单栏唤回来，并给一段"别急着再藏"的保持期。
+
+        只由 `_check_edge()` 在"确认用户就在桌面上"之后调用。
+        保持期**不压过遮挡判定**（见 `_desired_visible` 第 3 条）：
+        保持期内一旦有窗口压上来，菜单栏照样立刻让开。
+        """
         self._peek_until = time.monotonic() + PEEK_HOLD
         self._edge_since = 0.0
         self.evaluate()
@@ -820,24 +837,59 @@ class DockDodge(QObject):
         except Exception:
             return False
 
+    def _on_desktop(self) -> bool:
+        """现在是不是"就停在桌面上"——没有任何别的窗口占着前台。
+
+        边缘唤回**只在这里生效**。判据两条，都满足才算：
+
+        1. 菜单栏那一带没被占（`_fullscreen` / `_covered` 都是 False）；
+        2. 前台窗口就是桌面本身（`Progman` / `WorkerW` / `SHELLDLL_DefView`）。
+
+        为什么第 2 条不能省：只看"有没有窗口压住菜单栏"是不够的。
+        全屏播放器把鼠标甩到底部、浏览器窗口没压住菜单栏但用户正在里面打字，
+        这两种情况下鼠标都可能正好划过菜单栏那块矩形——只看矩形的话，
+        菜单栏就会莫名其妙弹出来。加上"前台必须是桌面"之后，
+        **只有用户真的在桌面上找菜单栏时才会弹**。
+
+        探测关掉时（离屏自检）一律返回 False：没有窗口管理器，
+        `GetForegroundWindow` 拿到的是真实桌面上的窗口，判定必然失真。
+        """
+        if not self.probe_enabled:
+            return False
+        try:
+            if self._fullscreen or self._covered:
+                return False
+            if self.tray is not None and not self.tray._desktop_is_foreground():
+                return False
+        except Exception:
+            return False
+        return True
+
     def _check_edge(self) -> None:
-        """鼠标停在边缘够久了就唤回；已经唤回来且还停在上面就续期。"""
-        if not self._occluded:
+        """鼠标在菜单栏那一带停久了就唤回来；已经唤回来且还压在上面就续期。
+
+        ⚠️ 开头那道 `_on_desktop()` 闸门是**必需的**，不是保险：
+        没有它的时候，全屏看视频把鼠标移到屏幕底部找播放控制条，
+        菜单栏就会"自己弹出来"盖在视频上——这正是用户报的那个 bug。
+        """
+        if not self._on_desktop():
             self._edge_since = 0.0
             return
+
+        now = time.monotonic()
         hidden = self.dock.isHidden()
-        if not hidden and time.monotonic() >= self._peek_until:
-            # 已经显示着、且不在保持期里（正常情况）——没什么要做
-            self._edge_since = 0.0
+
+        if not hidden:
+            # 已经显示着：鼠标还压在菜单栏上就一直续期，
+            # 让用户能从容地挪到图标上点下去，不会点一半又滑走。
+            if now < self._peek_until and self._mouse_on_edge():
+                self._peek_until = now + PEEK_HOLD
+            else:
+                self._edge_since = 0.0
             return
+
         if not self._mouse_on_edge():
             self._edge_since = 0.0
-            return
-        now = time.monotonic()
-        if not hidden and now < self._peek_until:
-            # 用户已经唤回来了、鼠标也还在菜单栏上：一直续期，
-            # 让他能从容地挪到图标上点下去，不会点一半又滑走。
-            self._peek_until = now + PEEK_HOLD
             return
         if self._edge_since == 0.0:
             self._edge_since = now
@@ -861,6 +913,7 @@ class DockDodge(QObject):
             "occluded": self._occluded,
             "fullscreen": self._fullscreen,
             "covered": self._covered,
+            "on_desktop": self._on_desktop(),
             "peek": max(0.0, self._peek_until - time.monotonic()),
             "animating": self._animating,
             "click_through": self._click_through,
